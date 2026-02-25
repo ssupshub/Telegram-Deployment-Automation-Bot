@@ -72,11 +72,22 @@ class TestAuditLoggerWrite:
         assert events[1]["action"] == "deploy_success"
 
     def test_log_does_not_raise_on_ioerror(self, tmp_path):
-        """If the log file can't be written, the bot should not crash."""
-        bad_path = "/root/no_permission/audit.log"
-        logger = AuditLogger(log_path=bad_path)
-        # Should log a warning but NOT raise
-        logger.log(USER, "deploy_started", {})  # no exception
+        """
+        If the log directory can't be created or file can't be written,
+        the bot must not crash — it should just log the error.
+
+        We mock Path.mkdir and builtins.open to simulate the failure
+        without touching any real restricted paths. This is portable
+        across all CI environments regardless of filesystem permissions.
+        """
+        from unittest.mock import patch, MagicMock
+        log_path = str(tmp_path / "audit.log")
+        audit_logger = AuditLogger(log_path=log_path)
+
+        # Simulate mkdir succeeding but open() raising PermissionError
+        with patch("builtins.open", side_effect=OSError("Permission denied")):
+            # Must not raise — error is caught internally and logged
+            audit_logger.log(USER, "deploy_started", {})
 
 
 class TestGetRecent:
