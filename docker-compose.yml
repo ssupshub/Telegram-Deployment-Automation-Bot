@@ -1,0 +1,95 @@
+version: "3.9"
+
+# ── Networks ───────────────────────────────────────────────────────────────────
+networks:
+  bot_net:
+    driver: bridge
+
+# ── Volumes ────────────────────────────────────────────────────────────────────
+volumes:
+  bot_state:   # Persistent deployment state (/var/lib/deploybot)
+  bot_logs:    # Persistent audit logs (/var/log/deploybot)
+  ssh_keys:    # Mount your SSH deploy keys here (read-only)
+
+# ── Services ───────────────────────────────────────────────────────────────────
+services:
+
+  # ── Telegram Bot ──────────────────────────────────────────────────────────
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: deploy_bot
+    restart: unless-stopped
+    networks:
+      - bot_net
+
+    # All secrets via environment — NEVER bake into image
+    env_file:
+      - .env
+
+    volumes:
+      # Deployment state persistence
+      - bot_state:/var/lib/deploybot
+      # Audit log persistence
+      - bot_logs:/var/log/deploybot
+      # SSH key for deploying to remote servers (read-only mount)
+      - type: bind
+        source: ./secrets/deploy_key
+        target: /app/secrets/deploy_key
+        read_only: true
+      # Mount Docker socket so bot can run docker commands
+      # SECURITY NOTE: This gives the container root-equivalent access to Docker.
+      # In production, consider using Docker-in-Docker or a remote Docker context instead.
+      - /var/run/docker.sock:/var/run/docker.sock
+
+    # Resource limits (tune based on your server)
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 64M
+
+    # Logging driver — ship to CloudWatch or ELK in production
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import telegram; print('ok')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # ── Prometheus Metrics Exporter (optional) ─────────────────────────────────
+  # Uncomment to enable Prometheus monitoring
+  # prometheus:
+  #   image: prom/prometheus:latest
+  #   container_name: prometheus
+  #   restart: unless-stopped
+  #   networks:
+  #     - bot_net
+  #   ports:
+  #     - "9090:9090"
+  #   volumes:
+  #     - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+
+  # ── Nginx Reverse Proxy (if using webhook mode instead of polling) ──────────
+  # nginx:
+  #   image: nginx:alpine
+  #   container_name: nginx_proxy
+  #   restart: unless-stopped
+  #   networks:
+  #     - bot_net
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   volumes:
+  #     - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+  #     - ./nginx/certs:/etc/nginx/certs:ro

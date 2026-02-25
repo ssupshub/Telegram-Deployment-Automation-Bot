@@ -1,0 +1,252 @@
+name: CI/CD Pipeline
+
+# ── Triggers ───────────────────────────────────────────────────────────────────
+on:
+  push:
+    branches:
+      - main        # → triggers production-ready build
+      - develop     # → triggers staging-ready build
+  pull_request:
+    branches:
+      - main
+      - develop
+
+# ── Permissions ───────────────────────────────────────────────────────────────
+permissions:
+  contents: read
+  id-token: write   # Required for OIDC authentication to AWS
+
+# ── Environment Variables ─────────────────────────────────────────────────────
+env:
+  AWS_REGION: us-east-1
+  ECR_REGISTRY: ${{ secrets.ECR_REGISTRY }}    # e.g. 123456789.dkr.ecr.us-east-1.amazonaws.com
+  IMAGE_NAME: myapp
+
+jobs:
+
+  # ── Job 1: Test ──────────────────────────────────────────────────────────────
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r bot/requirements.txt
+          pip install pytest pytest-asyncio pytest-mock
+
+      - name: Run unit tests
+        run: |
+          pytest tests/ -v --tb=short
+
+      - name: Run linter
+        run: |
+          pip install ruff
+          ruff check bot/
+
+      - name: Security scan (check for hardcoded secrets)
+        run: |
+          pip install detect-secrets
+          detect-secrets scan --baseline .secrets.baseline
+
+  # ── Job 2: Build & Push Docker Image ─────────────────────────────────────────
+  build-and-push:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+    needs: test
+    # Only build on push to main or develop — not on PRs
+    if: github.event_name == 'push'
+
+    outputs:
+      image_tag: ${{ steps.meta.outputs.version }}
+      full_image: ${{ steps.meta.outputs.tags }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC — no long-lived secrets)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=sha,prefix=,format=short
+            type=ref,event=branch
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+
+      - name: Set up Docker Buildx (for caching)
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            GIT_COMMIT=${{ github.sha }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+          # Cache layers between runs to speed up builds
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Image vulnerability scan
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          format: table
+          exit-code: "1"      # Fail the build on CRITICAL vulnerabilities
+          severity: CRITICAL
+
+  # ── Job 3: Deploy to Staging ──────────────────────────────────────────────────
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.ref == 'refs/heads/develop'
+    environment: staging
+
+    steps:
+      - name: Checkout scripts
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy to staging via SSH
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.STAGING_SSH_KEY }}
+          STAGING_HOST: ${{ secrets.STAGING_HOST }}
+          DEPLOY_USER: deploy
+          IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
+        run: |
+          # Write SSH key to temp file
+          echo "${SSH_PRIVATE_KEY}" > /tmp/deploy_key
+          chmod 600 /tmp/deploy_key
+
+          # SSH into staging server and run deploy
+          ssh -i /tmp/deploy_key \
+              -o StrictHostKeyChecking=no \
+              "${DEPLOY_USER}@${STAGING_HOST}" \
+              "cd /opt/myapp && \
+               export IMAGE_TAG=${ECR_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG} && \
+               docker compose pull && \
+               docker compose up -d --remove-orphans"
+
+          # Clean up key
+          rm -f /tmp/deploy_key
+
+      - name: Health check
+        run: |
+          sleep 15  # Give container time to start
+          for i in {1..10}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" ${{ secrets.STAGING_HEALTH_URL }})
+            if [ "$STATUS" = "200" ]; then
+              echo "Health check passed!"
+              exit 0
+            fi
+            echo "Attempt $i: HTTP $STATUS — waiting 10s..."
+            sleep 10
+          done
+          echo "Health check FAILED after 10 attempts"
+          exit 1
+
+  # ── Job 4: Deploy to Production (manual approval required) ───────────────────
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.ref == 'refs/heads/main'
+    # GitHub Environments with required reviewers = manual approval gate
+    environment:
+      name: production
+      url: https://production.example.com
+
+    steps:
+      - name: Checkout scripts
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy to production
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.PRODUCTION_SSH_KEY }}
+          PRODUCTION_HOST: ${{ secrets.PRODUCTION_HOST }}
+          IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
+        run: |
+          echo "${SSH_PRIVATE_KEY}" > /tmp/deploy_key
+          chmod 600 /tmp/deploy_key
+
+          ssh -i /tmp/deploy_key \
+              -o StrictHostKeyChecking=no \
+              deploy@${PRODUCTION_HOST} \
+              "cd /opt/myapp && \
+               export IMAGE_TAG=${ECR_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG} && \
+               docker compose pull && \
+               docker compose up -d --remove-orphans"
+
+          rm -f /tmp/deploy_key
+
+      - name: Production health check
+        run: |
+          sleep 20
+          for i in {1..15}; do
+            STATUS=$(curl -s -o /dev/null -w "%{http_code}" ${{ secrets.PRODUCTION_HEALTH_URL }})
+            if [ "$STATUS" = "200" ]; then
+              echo "Production health check passed!"
+              exit 0
+            fi
+            echo "Attempt $i: HTTP $STATUS"
+            sleep 15
+          done
+          exit 1
+
+      - name: Notify Telegram on success
+        if: success()
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d text="✅ Production deployment succeeded! Commit: ${GITHUB_SHA::8}" \
+            -d parse_mode="Markdown"
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+      - name: Notify Telegram on failure
+        if: failure()
+        run: |
+          curl -s -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            -d chat_id="${TELEGRAM_CHAT_ID}" \
+            -d text="❌ Production deployment FAILED! Commit: ${GITHUB_SHA::8} — check GitHub Actions." \
+            -d parse_mode="Markdown"
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
