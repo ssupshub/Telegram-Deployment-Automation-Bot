@@ -525,3 +525,7 @@ Observability:
   while monitoring metrics, catches regressions with limited blast radius.
 
 ---
+
+## License
+
+MIT — use freely, but don't deploy to production without reading the security checklist above.

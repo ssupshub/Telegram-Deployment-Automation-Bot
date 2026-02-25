@@ -13,7 +13,7 @@ import asyncio
 import logging
 import subprocess
 import shlex
-from datetime import datetime
+from datetime import datetime, timezone
 from functools import wraps
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -115,7 +115,7 @@ async def _confirm_production_deploy(update: Update, context: ContextTypes.DEFAU
         f"👤 Initiated by: @{user['username']}\n"
         f"🌿 Branch: `{branch}`\n"
         f"🔖 Commit: `{commit_hash}`\n"
-        f"🕐 Time: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC\n\n"
+        f"🕐 Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC\n\n"
         f"Are you sure you want to deploy to *PRODUCTION*?",
         parse_mode=ParseMode.MARKDOWN_V2,
         reply_markup=reply_markup,
@@ -257,7 +257,7 @@ async def _run_deployment(
             f"🌍 Environment: `{environment}`\n"
             f"🔖 Commit: `{commit}`\n"
             f"👤 By: @{user['username']}\n"
-            f"🕐 {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC"
+            f"🕐 {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC"
         ),
         parse_mode=ParseMode.MARKDOWN_V2,
     )
