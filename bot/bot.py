@@ -8,13 +8,9 @@ Architecture:
   Telegram → Bot Handler → RBAC Check → Deployment Script → Health Check → Notify
 """
 
-import os
 import asyncio
 import logging
-import subprocess
-import shlex
 from datetime import datetime, timezone
-from functools import wraps
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -138,7 +134,7 @@ async def cmd_rollback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     environment = args[0]
     audit.log(user, "rollback_initiated", {"env": environment})
 
-    msg = await update.message.reply_text(f"⏪ Initiating rollback for *{environment}*...", parse_mode=ParseMode.MARKDOWN_V2)
+    await update.message.reply_text(f"⏪ Initiating rollback for *{environment}*...", parse_mode=ParseMode.MARKDOWN_V2)
 
     async for log_line in deploy_manager.run_rollback(environment):
         await context.bot.send_message(
@@ -198,9 +194,9 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     if is_admin:
         text += (
-            f"`/deploy production` \\- Deploy to production \\(requires confirmation\\)\n"
-            f"`/rollback staging` \\- Rollback staging\n"
-            f"`/rollback production` \\- Rollback production\n"
+            "`/deploy production` \\- Deploy to production \\(requires confirmation\\)\n"
+            "`/rollback staging` \\- Rollback staging\n"
+            "`/rollback production` \\- Rollback production\n"
         )
 
     await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN_V2)

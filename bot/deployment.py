@@ -15,9 +15,7 @@ command injection attacks completely.
 
 import asyncio
 import logging
-import shlex
 import subprocess
-import time
 from typing import AsyncGenerator
 
 import aiohttp
@@ -183,7 +181,6 @@ class DeploymentManager:
         Only pass what the deploy scripts actually need.
         Never pass the full os.environ — it might contain unintended secrets.
         """
-        import os
         return {
             "HOME": "/root",
             "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
