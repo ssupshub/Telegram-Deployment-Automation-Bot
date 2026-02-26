@@ -1,4 +1,4 @@
-#  Telegram Deployment Automation Bot
+# 🤖 Telegram Deployment Automation Bot
 
 A production-ready, secure Telegram bot for triggering deployments to staging and production
 environments — with RBAC, audit logging, real-time log streaming, health checks, and auto-rollback.
@@ -16,8 +16,8 @@ environments — with RBAC, audit logging, real-time log streaming, health check
 │       │  /deploy production                                             │
 │       ▼                                                                 │
 │  ┌─────────────┐    RBAC     ┌──────────────────┐   Audit Log           │
-│  │  Bot Handler│ ──────────► │  Role Check       │ ──────────► File/S3  │
-│  │  (PTB)      │             │  (admin_ids list) │                      │
+│  │  Bot Handler│ ──────────► │  Role Check      │ ──────────► File/S3   │ 
+│  │  (PTB)      │             │  (admin_ids list)│                       │
 │  └─────────────┘             └────────┬─────────┘                       │
 │                                       │ ✅ Authorized                   │
 │                              ┌────────▼─────────┐                       │
@@ -27,7 +27,7 @@ environments — with RBAC, audit logging, real-time log streaming, health check
 │                                       │ ✅ Confirmed                    │
 │                              ┌────────▼─────────┐                       │
 │                              │ DeploymentManager│                       │
-│                              │  subprocess exec  │                      │
+│                              │  subprocess exec │                       │
 │                              └────────┬─────────┘                       │
 │                                       │                                 │
 │          ┌────────────────────────────┼────────────────────┐            │
@@ -37,28 +37,28 @@ environments — with RBAC, audit logging, real-time log streaming, health check
 │   │ Git Pull    │           │  Docker Build    │  │ Push to ECR │       │
 │   │ (GitHub)    │           │  + Tag + Label   │  │ (AWS)       │       │
 │   └─────────────┘           └──────────────────┘  └──────┬──────┘       │
-│                                                           │             │
-│                              ┌────────────────────────────┘             │
+│                                                          │              │
+│                              ┌───────────────────────────┘              │
 │                              │                                          │
 │                    ┌─────────▼────────────────────────┐                 │
-│                    │           DEPLOY TARGET            │               │
-│                    │                                   │                │
+│                    │           DEPLOY TARGET          │                 │
+│                    │                                  │                 │
 │                    │  ┌─────────────┐  ┌───────────┐  │                 │
-│                    │  │Docker Compose│  │Kubernetes │  │                │
+│                    │  │Docker Compose│  │Kubernetes│  │                 │
 │                    │  │(SSH deploy) │  │(kubectl)  │  │                 │
 │                    │  └─────────────┘  └───────────┘  │                 │
-│                    └────────────────────────────────────┘               │
+│                    └──────────────────────────────────┘                 │
 │                                       │                                 │
 │                              ┌────────▼─────────┐                       │
-│                              │  Health Check     │                      │
-│                              │  (retry loop)     │                      │
+│                              │  Health Check    │                       │
+│                              │  (retry loop)    │                       │
 │                              └────────┬─────────┘                       │
 │                              ✅ Pass  │  ❌ Fail                       │
 │                     ┌─────────────────┴─────────────────┐               │
-│                     ▼                                    ▼              │
+│                     ▼                                   ▼               │
 │             ┌──────────────┐                   ┌─────────────────┐      │
 │             │ Write state  │                   │  Auto-Rollback  │      │
-│             │ Notify user ✅│                  │  Notify user ❌ │     │
+│             │ Notify user ✅│                 │  Notify user ❌ │      │
 │             └──────────────┘                   └─────────────────┘      │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -103,68 +103,338 @@ telegram-deploy-bot/
 
 ---
 
-## Quick Start
+## Installation Guide
 
-### 1. Clone and Configure
+> **No installs on your laptop.** Everything runs inside **AWS CloudShell** — a free terminal built into the AWS website. All you need is a web browser.
 
-```bash
-git clone https://github.com/yourorg/telegram-deploy-bot.git
-cd telegram-deploy-bot
+---
 
-# Copy and fill in your environment variables
-cp .env.example .env
-nano .env
+### What You Need Before Starting
+
+- An AWS account → [console.aws.amazon.com](https://console.aws.amazon.com) (free tier is fine)
+- A GitHub account → [github.com](https://github.com) (free)
+- The Telegram app on your phone
+
+---
+
+### What is AWS CloudShell?
+
+CloudShell is a free terminal that lives inside the AWS Console. Click the **`>_` icon** in the top navigation bar of any AWS page and a terminal opens in your browser — already logged into your AWS account. No installs, no configuration.
+
+**CloudShell comes with:** Python 3, Git, AWS CLI, pip, curl, ssh, ssh-keygen.  
+**You only need to install:** Terraform (one command, shown in Part 2).
+
+> **Tip:** CloudShell saves your files between sessions. If it times out after 20 minutes of inactivity, just click `>_` again — your files are still there.
+
+---
+
+### Part 1 — Create Your Telegram Bot
+
+Done on your phone. Takes about 2 minutes.
+
+**Step 1: Find BotFather**
+
+Open Telegram, search for `@BotFather` (blue checkmark — official one), tap Start.
+
+**Step 2: Create your bot**
+
+Send `/newbot` to BotFather. It asks two questions:
+- **Name** — anything you like, e.g. `My Deploy Bot`
+- **Username** — must end in `bot`, e.g. `mydeploybot_bot`
+
+BotFather replies with your token:
+```
+7123456789:AAHdqTcvCH1vGWJxfSeofSPs38eBlP2I9Igs
 ```
 
-### 2. Get Your Telegram User ID
+> ⚠️ **Save this token.** You'll need it in Part 4. Never share it publicly.
 
-Message [@userinfobot](https://t.me/userinfobot) on Telegram.
-Add your numeric ID to `ADMIN_TELEGRAM_IDS` in `.env`.
+**Step 3: Get your Telegram User ID**
 
-### 3. Create Your Bot
+Search for `@userinfobot` on Telegram, tap Start. It instantly replies with your User ID — a number like `123456789`. Write it down.
 
-1. Message [@BotFather](https://t.me/BotFather)
-2. Send `/newbot`, follow prompts
-3. Copy the token → `TELEGRAM_BOT_TOKEN` in `.env`
+---
 
-### 4. Set Up SSH Deploy Key
+### Part 2 — Open CloudShell and Install Terraform
+
+**Step 1: Open CloudShell**
+
+Go to [console.aws.amazon.com](https://console.aws.amazon.com) → click the **`>_` icon** in the top navigation bar → wait ~10 seconds for the terminal to load.
+
+**Step 2: Install Terraform**
+
+Paste this entire block into CloudShell and press Enter:
 
 ```bash
-# Generate a dedicated deploy key (no passphrase — used by scripts)
-ssh-keygen -t ed25519 -C "deploy-bot" -f ./secrets/deploy_key -N ""
+cd ~
+curl -fsSL https://releases.hashicorp.com/terraform/1.7.5/terraform_1.7.5_linux_amd64.zip -o terraform.zip
+unzip -o terraform.zip
+mkdir -p ~/.local/bin
+mv terraform ~/.local/bin/terraform
+export PATH=$PATH:~/.local/bin
+echo 'export PATH=$PATH:~/.local/bin' >> ~/.bashrc
 
-# Copy public key to your target servers
-ssh-copy-id -i ./secrets/deploy_key.pub deploy@your-staging-server
-ssh-copy-id -i ./secrets/deploy_key.pub deploy@your-production-server
+# Verify:
+terraform --version
+# Should print: Terraform v1.7.5
 ```
 
-### 5. Provision AWS Infrastructure
+**Step 3: Clone your GitHub repo into CloudShell**
 
 ```bash
-cd terraform
+git clone https://github.com/YOUR_USERNAME/YOUR_REPO.git
+cd YOUR_REPO
+```
 
-# Create a terraform.tfvars file:
-cat > terraform.tfvars <<EOF
-aws_region        = "us-east-1"
-ssh_public_key    = "$(cat ../secrets/deploy_key.pub)"
-github_org        = "yourorg"
-github_repo       = "yourrepo"
-EOF
+---
+
+### Part 3 — One-Time AWS Setup (Identity Provider)
+
+This lets GitHub Actions log into AWS without a password. You do this once, never again.
+
+1. In AWS Console, search for **IAM** → click it
+2. In the left sidebar click **Identity providers**
+3. Click **Add provider**
+4. Fill in the form:
+
+| Field | Value |
+|-------|-------|
+| Provider type | `OpenID Connect` |
+| Provider URL | `https://token.actions.githubusercontent.com` |
+| Audience | `sts.amazonaws.com` |
+
+5. Click **Get thumbprint** → click **Add provider**
+
+---
+
+### Part 4 — Run Terraform
+
+Terraform automatically creates all your AWS resources: EC2 servers, ECR image repository, IAM roles, security groups.
+
+```bash
+# In CloudShell:
+cd ~/YOUR_REPO/terraform
 
 terraform init
-terraform plan
-terraform apply
+terraform plan   # Preview what will be created — no changes yet
+terraform apply  # Type 'yes' when prompted
 ```
 
-### 6. Launch the Bot
+Takes 3–5 minutes. When done, copy the output values — you need them in Part 5:
+
+```
+ecr_registry    = "123456789.dkr.ecr.us-east-1.amazonaws.com"
+deploy_role_arn = "arn:aws:iam::123456789:role/myapp-github-actions-role"
+staging_ip      = "54.123.45.67"
+production_ip   = "54.123.45.89"
+```
+
+> **Tip:** Forgot to copy? Run `terraform output` anytime to see it again.
+
+---
+
+### Part 5 — Create SSH Keys in CloudShell
+
+**Step 1: Generate the key pair**
 
 ```bash
-# Development (with hot reload)
-docker compose up --build
-
-# Production (detached)
-docker compose up -d
+ssh-keygen -t ed25519 -f ~/.ssh/deploy_key -N ""
+# Creates:
+#   ~/.ssh/deploy_key      ← PRIVATE key (goes into GitHub Secrets)
+#   ~/.ssh/deploy_key.pub  ← PUBLIC key (goes onto your EC2 servers)
 ```
+
+**Step 2: Install the public key on your staging server**
+
+```bash
+# SSH into staging from CloudShell:
+ssh -i ~/.ssh/deploy_key ec2-user@YOUR_STAGING_IP
+
+# Now inside EC2 — run these:
+sudo useradd -m deploy
+sudo mkdir -p /home/deploy/.ssh
+sudo bash -c 'cat >> /home/deploy/.ssh/authorized_keys' << 'EOF'
+PASTE_CONTENTS_OF_deploy_key.pub_HERE
+EOF
+sudo chown -R deploy:deploy /home/deploy/.ssh
+sudo chmod 700 /home/deploy/.ssh
+sudo chmod 600 /home/deploy/.ssh/authorized_keys
+sudo mkdir -p /opt/myapp
+sudo chown deploy:deploy /opt/myapp
+
+exit  # back to CloudShell
+```
+
+Repeat for your production server using `YOUR_PRODUCTION_IP`.
+
+**Step 3: Print your private key (to copy into GitHub)**
+
+```bash
+cat ~/.ssh/deploy_key
+```
+
+Select all output — including the `-----BEGIN` and `-----END` lines — and copy it. You'll paste it into GitHub Secrets next.
+
+---
+
+### Part 6 — Add Secrets to GitHub
+
+Go to: your repo on github.com → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**
+
+Add all 10 secrets:
+
+| Secret Name | Where to get the value | What it does |
+|---|---|---|
+| `TELEGRAM_BOT_TOKEN` | From BotFather (Part 1) | Lets GitHub send Telegram notifications |
+| `TELEGRAM_CHAT_ID` | Your User ID from @userinfobot (Part 1) | Who to notify |
+| `ECR_REGISTRY` | Terraform output: `ecr_registry` | Docker image storage URL |
+| `AWS_DEPLOY_ROLE_ARN` | Terraform output: `deploy_role_arn` | Lets GitHub log into AWS |
+| `STAGING_SSH_KEY` | Output of `cat ~/.ssh/deploy_key` in CloudShell | SSH access to staging |
+| `PRODUCTION_SSH_KEY` | Output of `cat ~/.ssh/deploy_key` (same file) | SSH access to production |
+| `STAGING_HOST` | Terraform output: `staging_ip` | Staging server IP |
+| `PRODUCTION_HOST` | Terraform output: `production_ip` | Production server IP |
+| `STAGING_HEALTH_URL` | `http://YOUR_STAGING_IP/health` | Health check URL for staging |
+| `PRODUCTION_HEALTH_URL` | `http://YOUR_PRODUCTION_IP/health` | Health check URL for production |
+
+---
+
+### Part 7 — Set Up GitHub Environments
+
+This adds a manual approval gate before anything deploys to production.
+
+**Create the production environment (approval required):**
+
+1. Your repo → **Settings** → **Environments** → **New environment**
+2. Name it exactly: `production`
+3. Click **Configure environment**
+4. Under **Required reviewers** — add your GitHub username
+5. Click **Save protection rules**
+
+**Create the staging environment (no approval needed):**
+
+1. **New environment** → name it `staging`
+2. Leave everything blank → **Save**
+
+---
+
+### Part 8 — Configure the Bot on Your EC2 Servers
+
+SSH into each server from CloudShell and create the `.env` file:
+
+```bash
+ssh -i ~/.ssh/deploy_key deploy@YOUR_STAGING_IP
+
+cat > /opt/myapp/.env << 'EOF'
+TELEGRAM_BOT_TOKEN=7123456789:AAHdqTcvCH1vGWJxfSeofSPs38eBlP2I9Igs
+ADMIN_TELEGRAM_IDS=123456789
+STAGING_TELEGRAM_IDS=123456789
+REGISTRY_URL=123456789.dkr.ecr.us-east-1.amazonaws.com
+REGISTRY_IMAGE=myapp
+STAGING_HOST=54.123.45.67
+PRODUCTION_HOST=54.123.45.89
+EOF
+
+chmod 600 /opt/myapp/.env
+exit
+```
+
+Repeat for your production server. Replace all values with your own.
+
+> **Multiple admins?** Separate User IDs with commas: `ADMIN_TELEGRAM_IDS=123456789,987654321`
+
+---
+
+### Part 9 — Push Your Code
+
+**Deploy to staging** (push to the `develop` branch):
+
+```bash
+# In CloudShell:
+cd ~/YOUR_REPO
+git checkout -b develop
+git add .
+git commit -m "Initial setup"
+git push origin develop
+```
+
+Go to **github.com → your repo → Actions tab** to watch it run. The pipeline will:
+- Run 79 tests
+- Run the linter
+- Build and push a Docker image to ECR
+- SSH into staging and deploy the container
+- Health check staging
+
+Takes about 3–5 minutes.
+
+**Deploy to production** (push to the `main` branch):
+
+```bash
+git checkout main
+git merge develop
+git push origin main
+```
+
+GitHub pauses and emails you for approval. Go to **Actions → the waiting run → Review deployments → check `production` → Approve and deploy**.
+
+When it succeeds, your Telegram bot sends you:
+```
+✅ Production deployment succeeded! Commit: a1b2c3d4
+```
+
+---
+
+### Troubleshooting
+
+**`terraform: command not found` in CloudShell**
+CloudShell timed out and reset the PATH. Re-run:
+```bash
+export PATH=$PATH:~/.local/bin
+```
+
+**Pipeline fails at "Configure AWS credentials"**
+Check `AWS_DEPLOY_ROLE_ARN` is exactly what Terraform output. Also make sure you completed Part 3 (adding GitHub as identity provider) — without it the role will never trust GitHub.
+
+**Pipeline fails at "Deploy via SSH"**
+The SSH key is usually wrong. Make sure you copied the full private key including `-----BEGIN OPENSSH PRIVATE KEY-----` and `-----END OPENSSH PRIVATE KEY-----`. Test the key directly:
+```bash
+ssh -i ~/.ssh/deploy_key deploy@YOUR_SERVER_IP echo ok
+# Should print: ok
+```
+
+**Health check fails after deploy**
+```bash
+ssh -i ~/.ssh/deploy_key deploy@YOUR_STAGING_IP
+cd /opt/myapp
+docker compose ps      # Are containers running?
+docker compose logs    # Any errors?
+```
+
+**Bot doesn't respond in Telegram**
+```bash
+cat /opt/myapp/.env    # Verify values look correct
+docker compose logs    # Look for token or auth errors
+```
+
+---
+
+### Checklist — Before Your First Push
+
+```
+☐ Created Telegram bot and saved the token (Part 1)
+☐ Got your Telegram User ID from @userinfobot (Part 1)
+☐ Opened CloudShell and installed Terraform (Part 2)
+☐ Cloned your GitHub repo into CloudShell (Part 2)
+☐ Added GitHub as identity provider in AWS IAM (Part 3)
+☐ Ran terraform apply and copied the 4 output values (Part 4)
+☐ Generated SSH key in CloudShell (Part 5)
+☐ Installed public key and created deploy user on BOTH servers (Part 5)
+☐ Added all 10 secrets to GitHub (Part 6)
+☐ Created 'production' environment in GitHub with yourself as reviewer (Part 7)
+☐ Created 'staging' environment in GitHub with no reviewer (Part 7)
+☐ Created .env file on BOTH servers (Part 8)
+```
+
+Every box ticked? Run `git push origin develop` in CloudShell and watch the Actions tab. 🚀
 
 ---
 
@@ -449,18 +719,20 @@ Option B: One bot per team
 
 Go to: `Settings > Secrets and variables > Actions`
 
+See [Part 6 of the Installation Guide](#part-6--add-secrets-to-github) for where to get each value.
+
 | Secret Name | Value |
 |-------------|-------|
-| `ECR_REGISTRY` | `123456789.dkr.ecr.us-east-1.amazonaws.com` |
-| `AWS_DEPLOY_ROLE_ARN` | ARN from `terraform output github_actions_role` |
-| `STAGING_SSH_KEY` | Contents of `./secrets/deploy_key` |
-| `PRODUCTION_SSH_KEY` | Contents of `./secrets/deploy_key` |
-| `STAGING_HOST` | Your staging server IP |
-| `PRODUCTION_HOST` | Your production server IP |
-| `STAGING_HEALTH_URL` | `https://staging.example.com/health` |
-| `PRODUCTION_HEALTH_URL` | `https://production.example.com/health` |
 | `TELEGRAM_BOT_TOKEN` | From BotFather |
-| `TELEGRAM_CHAT_ID` | Your admin chat/channel ID |
+| `TELEGRAM_CHAT_ID` | Your Telegram User ID (from @userinfobot) |
+| `ECR_REGISTRY` | From `terraform output` → `ecr_registry` |
+| `AWS_DEPLOY_ROLE_ARN` | From `terraform output` → `deploy_role_arn` |
+| `STAGING_SSH_KEY` | Output of `cat ~/.ssh/deploy_key` in CloudShell |
+| `PRODUCTION_SSH_KEY` | Output of `cat ~/.ssh/deploy_key` in CloudShell |
+| `STAGING_HOST` | From `terraform output` → `staging_ip` |
+| `PRODUCTION_HOST` | From `terraform output` → `production_ip` |
+| `STAGING_HEALTH_URL` | `http://YOUR_STAGING_IP/health` |
+| `PRODUCTION_HEALTH_URL` | `http://YOUR_PRODUCTION_IP/health` |
 
 ---
 
@@ -525,5 +797,4 @@ Observability:
   while monitoring metrics, catches regressions with limited blast radius.
 
 ---
-
 
