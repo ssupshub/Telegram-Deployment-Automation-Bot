@@ -1,4 +1,4 @@
-# 🤖 Telegram Deployment Automation Bot
+#  Telegram Deployment Automation Bot
 
 A production-ready, secure Telegram bot for triggering deployments to staging and production
 environments — with RBAC, audit logging, real-time log streaming, health checks, and auto-rollback.
@@ -526,6 +526,4 @@ Observability:
 
 ---
 
-## License
 
-MIT — use freely, but don't deploy to production without reading the security checklist above.
