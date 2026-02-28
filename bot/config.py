@@ -1,6 +1,16 @@
 """
 config.py - Centralized configuration from environment variables.
 Never hardcode secrets. All sensitive values come from the environment.
+
+BUGS FIXED:
+  - Class-level string attributes like _ADMIN_IDS_RAW are evaluated once at
+    import time.  This means tests that call monkeypatch.setenv() after the
+    module is first imported get stale values.  The fix is to read those
+    environment variables inside the @classmethod bodies so they are always
+    current.  The existing reload_config() workaround in the tests still works,
+    but it is no longer necessary.
+  - AWS_REGION was missing entirely; it is needed by deploy.sh for ECR login
+    and is now exposed via Config.AWS_REGION.
 """
 
 import os
@@ -9,18 +19,30 @@ from typing import Set
 
 class Config:
     # ── Bot Secrets ──────────────────────────────────────────────────────────
-    TELEGRAM_BOT_TOKEN: str = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    @classmethod
+    def _get(cls, key: str, default: str = "") -> str:
+        """Read an env var at call time (not at import time)."""
+        return os.environ.get(key, default)
 
-    # ── RBAC: Comma-separated Telegram user IDs ──────────────────────────────
-    # Admin: can deploy to production, rollback, full access
-    # Staging users: can deploy to staging and check status only
-    _ADMIN_IDS_RAW: str = os.environ.get("ADMIN_TELEGRAM_IDS", "")
-    _STAGING_IDS_RAW: str = os.environ.get("STAGING_TELEGRAM_IDS", "")
+    @property
+    def TELEGRAM_BOT_TOKEN(self):  # kept as property for backward-compat
+        return os.environ.get("TELEGRAM_BOT_TOKEN", "")
+
+    # Class-level attribute kept for import-time consumers (e.g. Application.builder).
+    # Tests that need to override this should set the env var before importing bot.py.
+    TELEGRAM_BOT_TOKEN: str = os.environ.get("TELEGRAM_BOT_TOKEN", "")  # type: ignore[assignment]
+
+    # ── RBAC ─────────────────────────────────────────────────────────────────
+    # BUG FIX: read raw ID strings inside classmethods so that monkeypatch.setenv()
+    # works without reload_config().  The class-level attributes below are
+    # intentionally *not* used; they exist only for static-analysis tools.
+    _ADMIN_IDS_RAW: str = ""    # sentinel; actual value read in admin_ids()
+    _STAGING_IDS_RAW: str = ""  # sentinel; actual value read in staging_ids()
 
     @classmethod
     def _parse_ids(cls, raw: str) -> Set[int]:
         """Parse comma-separated integer IDs, ignoring blanks/invalid."""
-        ids = set()
+        ids: Set[int] = set()
         for part in raw.split(","):
             part = part.strip()
             if part.isdigit():
@@ -29,12 +51,13 @@ class Config:
 
     @classmethod
     def admin_ids(cls) -> Set[int]:
-        return cls._parse_ids(cls._ADMIN_IDS_RAW)
+        # BUG FIX: read from os.environ every time, not from the stale class attr.
+        return cls._parse_ids(os.environ.get("ADMIN_TELEGRAM_IDS", ""))
 
     @classmethod
     def staging_ids(cls) -> Set[int]:
         """Staging users PLUS all admins (admins are supersets)."""
-        return cls._parse_ids(cls._STAGING_IDS_RAW) | cls.admin_ids()
+        return cls._parse_ids(os.environ.get("STAGING_TELEGRAM_IDS", "")) | cls.admin_ids()
 
     @classmethod
     def is_admin(cls, user_id: int) -> bool:
@@ -51,8 +74,11 @@ class Config:
     GITHUB_BRANCH_STAGING: str = os.environ.get("GITHUB_BRANCH_STAGING", "develop")
     GITHUB_BRANCH_PRODUCTION: str = os.environ.get("GITHUB_BRANCH_PRODUCTION", "main")
 
-    REGISTRY_URL: str = os.environ.get("REGISTRY_URL", "")          # e.g. 123456789.dkr.ecr.us-east-1.amazonaws.com
+    REGISTRY_URL: str = os.environ.get("REGISTRY_URL", "")
     REGISTRY_IMAGE: str = os.environ.get("REGISTRY_IMAGE", "myapp")
+
+    # BUG FIX: AWS_REGION was missing; deploy.sh needs it for ECR login.
+    AWS_REGION: str = os.environ.get("AWS_REGION", "us-east-1")
 
     # ── Server / SSH ─────────────────────────────────────────────────────────
     STAGING_HOST: str = os.environ.get("STAGING_HOST", "")
@@ -78,10 +104,12 @@ class Config:
     @classmethod
     def validate(cls):
         """Call on startup to fail fast if required config is missing."""
+        # BUG FIX: read directly from env (not stale class attrs) so this works
+        # whether or not the module has been reloaded.
         required = {
-            "TELEGRAM_BOT_TOKEN": cls.TELEGRAM_BOT_TOKEN,
-            "ADMIN_TELEGRAM_IDS": cls._ADMIN_IDS_RAW,
-            "REGISTRY_URL": cls.REGISTRY_URL,
+            "TELEGRAM_BOT_TOKEN": os.environ.get("TELEGRAM_BOT_TOKEN", ""),
+            "ADMIN_TELEGRAM_IDS": os.environ.get("ADMIN_TELEGRAM_IDS", ""),
+            "REGISTRY_URL": os.environ.get("REGISTRY_URL", ""),
         }
         missing = [k for k, v in required.items() if not v]
         if missing:
