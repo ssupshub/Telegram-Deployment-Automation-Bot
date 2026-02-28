@@ -15,6 +15,14 @@ __init__. This means importing the module (and instantiating AuditLogger
 at module level in bot.py) never touches the filesystem — which is
 essential for running tests in sandboxed CI environments like GitHub Actions
 where /var/log/deploybot doesn't exist and can't be created.
+
+BUGS FIXED:
+  - get_recent() caught FileNotFoundError and JSONDecodeError in the same
+    except clause and returned [] for both.  A single corrupt line therefore
+    caused ALL events to be silently discarded.
+    Fix: catch FileNotFoundError separately (return []).  For JSONDecodeError,
+    skip only the offending line and collect the rest so callers still receive
+    the valid events.
 """
 
 import json
@@ -67,7 +75,7 @@ class AuditLogger:
         # Always emit to the Python logger (captured by Docker/systemd/CloudWatch)
         logger.info("AUDIT: %s", json.dumps(event))
 
-        # Lazily ensure the directory exists, then write
+        # Lazily ensure the directory exists, then write.
         self._ensure_log_dir()
         try:
             with open(self.log_path, "a") as f:
@@ -76,11 +84,31 @@ class AuditLogger:
             logger.error("Failed to write audit log: %s", e)
 
     def get_recent(self, limit: int = 20) -> list:
-        """Return the last N audit events (for /history command)."""
+        """
+        Return the last N audit events (for /history command).
+
+        BUG FIX: the original implementation caught FileNotFoundError and
+        JSONDecodeError in one bare `except` block and returned [] for both.
+        A single malformed line therefore caused ALL events to be lost.
+
+        Fix:
+          • FileNotFoundError → return [] (no log file yet, expected).
+          • JSONDecodeError per line → skip that line, keep the rest.
+        """
         try:
             with open(self.log_path) as f:
                 lines = f.readlines()
-            events = [json.loads(line) for line in lines if line.strip()]
-            return events[-limit:]
-        except (FileNotFoundError, json.JSONDecodeError):
+        except FileNotFoundError:
             return []
+
+        events = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                logger.warning("Skipping corrupt audit log line: %r", line[:120])
+
+        return events[-limit:]
