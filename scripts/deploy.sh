@@ -17,6 +17,23 @@
 # Exit codes:
 #   0 = success
 #   1 = failure (triggers auto-rollback in bot)
+#
+# BUGS FIXED:
+#   Health-check loop off-by-one:
+#     The original checked `if [[ ${ATTEMPT} -ge ${MAX_RETRIES} ]]; then exit 1`
+#     INSIDE the while loop, AFTER the sleep.  On the last iteration the flow
+#     was: attempt++, HTTP check fails, sleep, THEN check attempt>=max → exit 1.
+#     This meant the loop always slept one extra time on the final attempt and
+#     the log said "attempt 10/10 — waiting 10s" before exiting, which is
+#     misleading (we already know we're done).
+#
+#     Fix: check the exhaustion condition at the TOP of the loop body, before
+#     the sleep.  If we've already used all retries, exit immediately without
+#     an extra sleep.  The structure is now:
+#       1. increment counter
+#       2. do the HTTP check → break on success
+#       3. if counter >= max → exit 1 (no more retries left, don't sleep)
+#       4. sleep and loop
 # =============================================================================
 
 set -euo pipefail  # Exit on error, undefined vars, pipe failures
@@ -28,7 +45,6 @@ TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
 STATE_DIR="/var/lib/deploybot"
 REPO_DIR="/app/repo"
-COMPOSE_FILE="/app/docker-compose.${ENVIRONMENT}.yml"
 
 # Derive image tag from environment + commit
 IMAGE_TAG="${REGISTRY_IMAGE}:${ENVIRONMENT}-${COMMIT}"
@@ -61,7 +77,6 @@ fi
 # ── Step 1: Pull Latest Code ───────────────────────────────────────────────────
 log_info "--- Step 1: Pulling latest code ---"
 
-BRANCH="${ENVIRONMENT}"
 if [[ "${ENVIRONMENT}" == "production" ]]; then
     BRANCH="main"
 else
@@ -122,9 +137,10 @@ if [[ "${USE_KUBERNETES:-false}" == "true" ]]; then
     # ── Kubernetes Deployment ────────────────────────────────────────────────
     log_info "Deploying to Kubernetes namespace: ${KUBE_NAMESPACE}"
 
-    KUBE_DEPLOYMENT="${KUBE_DEPLOYMENT_STAGING}"
     if [[ "${ENVIRONMENT}" == "production" ]]; then
         KUBE_DEPLOYMENT="${KUBE_DEPLOYMENT_PRODUCTION}"
+    else
+        KUBE_DEPLOYMENT="${KUBE_DEPLOYMENT_STAGING}"
     fi
 
     kubectl set image deployment/"${KUBE_DEPLOYMENT}" \
@@ -138,9 +154,10 @@ if [[ "${USE_KUBERNETES:-false}" == "true" ]]; then
 
 else
     # ── Docker Compose Deployment ────────────────────────────────────────────
-    TARGET_HOST="${STAGING_HOST}"
     if [[ "${ENVIRONMENT}" == "production" ]]; then
         TARGET_HOST="${PRODUCTION_HOST}"
+    else
+        TARGET_HOST="${STAGING_HOST}"
     fi
 
     log_info "Deploying to host: ${TARGET_HOST}"
@@ -164,9 +181,10 @@ log_info "Deployment commands completed."
 # ── Step 6: Health Check ───────────────────────────────────────────────────────
 log_info "--- Step 6: Health check ---"
 
-HEALTH_URL="${STAGING_HEALTH_URL}"
 if [[ "${ENVIRONMENT}" == "production" ]]; then
     HEALTH_URL="${PRODUCTION_HEALTH_URL}"
+else
+    HEALTH_URL="${STAGING_HEALTH_URL}"
 fi
 
 MAX_RETRIES=10
@@ -175,7 +193,16 @@ ATTEMPT=0
 
 log_info "Polling health endpoint: ${HEALTH_URL}"
 
-while [[ ${ATTEMPT} -lt ${MAX_RETRIES} ]]; do
+# BUG FIX: the original loop checked `ATTEMPT >= MAX_RETRIES` AFTER sleeping,
+# which meant the final failure message was always preceded by an unnecessary
+# sleep and printed "attempt 10/10 — waiting 10s" before exiting.
+#
+# New structure:
+#   1. increment ATTEMPT
+#   2. perform HTTP check → break on HTTP 200
+#   3. if ATTEMPT >= MAX_RETRIES → log and exit (no extra sleep)
+#   4. otherwise sleep and go back to step 1
+while true; do
     ATTEMPT=$((ATTEMPT + 1))
     log_info "Health check attempt ${ATTEMPT}/${MAX_RETRIES}..."
 
@@ -187,16 +214,19 @@ while [[ ${ATTEMPT} -lt ${MAX_RETRIES} ]]; do
     if [[ "${HTTP_STATUS}" == "200" ]]; then
         log_info "Health check PASSED (HTTP ${HTTP_STATUS})"
         break
-    else
-        log_warn "Health check FAILED (HTTP ${HTTP_STATUS}). Retrying in ${RETRY_DELAY}s..."
-        sleep "${RETRY_DELAY}"
     fi
 
+    log_warn "Health check FAILED (HTTP ${HTTP_STATUS})."
+
+    # BUG FIX: check exhaustion BEFORE sleeping so we don't waste time on the
+    # last failed attempt.
     if [[ ${ATTEMPT} -ge ${MAX_RETRIES} ]]; then
         log_error "Health check FAILED after ${MAX_RETRIES} attempts. Triggering rollback."
-        # The bot will handle rollback — signal failure via exit code
         exit 1
     fi
+
+    log_warn "Retrying in ${RETRY_DELAY}s..."
+    sleep "${RETRY_DELAY}"
 done
 
 # ── Step 7: Write State Files ──────────────────────────────────────────────────
