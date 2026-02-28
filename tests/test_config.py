@@ -1,16 +1,12 @@
 """
 test_config.py - Tests for Config class
-=========================================
-Covers: ID parsing, role checks, validate(), edge cases.
 """
-
 import os
 import importlib
 import pytest
 
 
 def reload_config():
-    """Re-import config so monkeypatched env vars take effect on class-level attributes."""
     import config
     importlib.reload(config)
     return config.Config
@@ -43,10 +39,8 @@ class TestIdParsing:
         assert Config.admin_ids() == {111, 222}
 
     def test_ignores_negative_numbers(self, monkeypatch):
-        # Negative IDs are not valid Telegram user IDs
         monkeypatch.setenv("ADMIN_TELEGRAM_IDS", "-111,222")
         Config = reload_config()
-        # -111 has a minus sign so isdigit() returns False — correctly ignored
         assert Config.admin_ids() == {222}
 
 
@@ -56,7 +50,7 @@ class TestRoleChecks:
         monkeypatch.setenv("STAGING_TELEGRAM_IDS", "")
         Config = reload_config()
         assert Config.is_admin(111) is True
-        assert Config.is_authorized(111) is True  # admins are always authorized
+        assert Config.is_authorized(111) is True
 
     def test_staging_user_is_authorized_but_not_admin(self, monkeypatch):
         monkeypatch.setenv("ADMIN_TELEGRAM_IDS", "111")
@@ -73,12 +67,11 @@ class TestRoleChecks:
         assert Config.is_authorized(999) is False
 
     def test_staging_ids_include_admins(self, monkeypatch):
-        """Admins must implicitly have staging access too."""
         monkeypatch.setenv("ADMIN_TELEGRAM_IDS", "111")
         monkeypatch.setenv("STAGING_TELEGRAM_IDS", "333")
         Config = reload_config()
         all_staging = Config.staging_ids()
-        assert 111 in all_staging  # admin also in staging
+        assert 111 in all_staging
         assert 333 in all_staging
 
     def test_empty_admin_list_means_no_admins(self, monkeypatch):
@@ -93,7 +86,7 @@ class TestValidate:
         monkeypatch.setenv("ADMIN_TELEGRAM_IDS", "111")
         monkeypatch.setenv("REGISTRY_URL", "123.dkr.ecr.us-east-1.amazonaws.com")
         Config = reload_config()
-        Config.validate()  # should not raise
+        Config.validate()
 
     def test_validate_raises_on_missing_token(self, monkeypatch):
         monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "")

@@ -1,52 +1,8 @@
-"""
-test_bot.py - Integration tests for Telegram command handlers
-==============================================================
-Covers: /deploy, /rollback, /status, /help — including RBAC enforcement,
-        production confirmation flow, callback handling, and error handler.
-
-All Telegram API calls and DeploymentManager methods are mocked.
-
-Design note: Config class attributes are set at import time via os.environ.get().
-We patch Config.is_admin / Config.is_authorized directly rather than trying
-to retroactively change env vars after the module is cached.
-"""
-
+"""test_bot.py - Integration tests for Telegram command handlers"""
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from conftest import make_update, make_context, make_callback_update
 
-
-# ── Shared Config patches ──────────────────────────────────────────────────────
-
-def _admin_patches():
-    """Context managers that make user 111 look like an admin."""
-    return [
-        patch("bot.Config.is_admin", return_value=True),
-        patch("bot.Config.is_authorized", return_value=True),
-        patch("rbac.Config.is_admin", return_value=True),
-        patch("rbac.Config.is_authorized", return_value=True),
-    ]
-
-def _staging_patches():
-    """Context managers that make user 333 look like a staging user (not admin)."""
-    return [
-        patch("bot.Config.is_admin", return_value=False),
-        patch("bot.Config.is_authorized", return_value=True),
-        patch("rbac.Config.is_admin", return_value=False),
-        patch("rbac.Config.is_authorized", return_value=True),
-    ]
-
-def _unauth_patches():
-    """Context managers for an unauthorized user."""
-    return [
-        patch("bot.Config.is_admin", return_value=False),
-        patch("bot.Config.is_authorized", return_value=False),
-        patch("rbac.Config.is_admin", return_value=False),
-        patch("rbac.Config.is_authorized", return_value=False),
-    ]
-
-
-# ── /help ─────────────────────────────────────────────────────────────────────
 
 class TestHelpCommand:
     @pytest.mark.asyncio
@@ -82,8 +38,6 @@ class TestHelpCommand:
         assert "/rollback production" in msg
 
 
-# ── /deploy ───────────────────────────────────────────────────────────────────
-
 class TestDeployCommand:
     @pytest.mark.asyncio
     async def test_deploy_without_args_shows_usage(self):
@@ -106,7 +60,6 @@ class TestDeployCommand:
 
     @pytest.mark.asyncio
     async def test_staging_user_blocked_from_production(self):
-        """Staging user attempting /deploy production must be denied."""
         from bot import cmd_deploy
         update = make_update(user_id=333)
         ctx = make_context(args=["production"])
@@ -158,11 +111,40 @@ class TestDeployCommand:
             mock_mgr.get_latest_commit.return_value = "abc1234"
             mock_mgr.run_deployment = fake_deploy
             await cmd_deploy(update, ctx)
-
         ctx.bot.send_message.assert_awaited()
 
+    @pytest.mark.asyncio
+    async def test_failed_deploy_triggers_rollback(self):
+        """BUG FIX: deploy failure must trigger auto-rollback, not silently succeed."""
+        from bot import cmd_deploy
+        update = make_update(user_id=333)
+        ctx = make_context(args=["staging"])
 
-# ── /rollback ─────────────────────────────────────────────────────────────────
+        async def fake_deploy_fail(env, commit):
+            yield "[INFO] Starting deploy"
+            yield "ERROR: Deploy script exited with code 1"
+
+        async def fake_rollback(env):
+            yield "[ROLLBACK] Restoring previous image"
+
+        rollback_called = []
+
+        async def tracking_rollback(env):
+            rollback_called.append(env)
+            yield "[ROLLBACK] Done"
+
+        with patch("rbac.Config.is_authorized", return_value=True), \
+             patch("bot.Config.is_admin", return_value=False), \
+             patch("bot.deploy_manager") as mock_mgr, \
+             patch("bot.send_chunked", new_callable=AsyncMock), \
+             patch("bot.audit"):
+            mock_mgr.get_latest_commit.return_value = "abc1234"
+            mock_mgr.run_deployment = fake_deploy_fail
+            mock_mgr.run_rollback = tracking_rollback
+            await cmd_deploy(update, ctx)
+
+        assert rollback_called, "Rollback must be called when deployment fails"
+
 
 class TestRollbackCommand:
     @pytest.mark.asyncio
@@ -198,11 +180,8 @@ class TestRollbackCommand:
             mock_mgr.run_rollback = fake_rollback
             await cmd_rollback(update, ctx)
             mock_audit.log.assert_called()
-
         ctx.bot.send_message.assert_awaited()
 
-
-# ── /status ───────────────────────────────────────────────────────────────────
 
 class TestStatusCommand:
     @pytest.mark.asyncio
@@ -248,8 +227,6 @@ class TestStatusCommand:
         assert "def5678" in msg
 
 
-# ── Callback Handler (inline buttons) ─────────────────────────────────────────
-
 class TestCallbackHandler:
     @pytest.mark.asyncio
     async def test_cancel_callback_cancels_deploy(self):
@@ -262,7 +239,6 @@ class TestCallbackHandler:
 
     @pytest.mark.asyncio
     async def test_production_callback_rerequires_admin(self):
-        """A staging user who somehow gets the callback data must still be blocked."""
         from bot import handle_callback
         update = make_callback_update(user_id=333, data="deploy:production:abc1234")
         with patch("bot.Config.is_admin", return_value=False):
@@ -286,11 +262,20 @@ class TestCallbackHandler:
             mock_mgr.run_deployment = fake_deploy
             mock_mgr.get_latest_commit.return_value = "abc1234"
             await handle_callback(update, ctx)
-
         update.callback_query.edit_message_text.assert_awaited()
 
+    @pytest.mark.asyncio
+    async def test_callback_with_colon_in_commit_hash(self):
+        """BUG FIX: maxsplit=2 means colons in the commit slot are handled correctly."""
+        from bot import handle_callback
+        # Even if data has extra colons (malformed), parts[1] should still be environment
+        update = make_callback_update(user_id=333, data="deploy:production:abc:extra")
+        with patch("bot.Config.is_admin", return_value=False):
+            await handle_callback(update, make_context())
+        # Should be blocked as non-admin, not crash
+        msg = update.callback_query.edit_message_text.call_args[0][0]
+        assert any(w in msg.lower() for w in ["permission", "denied", "no longer"])
 
-# ── Error Handler ─────────────────────────────────────────────────────────────
 
 class TestErrorHandler:
     @pytest.mark.asyncio

@@ -2,11 +2,23 @@
 # terraform/main.tf
 # Provisions AWS infrastructure for the Telegram Deployment Bot:
 #   - VPC with public subnet
-#   - EC2 instance (bot host)
+#   - EC2 instances: one for staging, one for production  (BUG FIX: original
+#     only created one instance named "bot", but the README and CI/CD pipeline
+#     reference both staging_ip and production_ip outputs — the second server
+#     was simply missing)
 #   - Security Group (SSH + HTTPS only)
 #   - ECR repository for Docker images
 #   - IAM role for EC2 with ECR pull permissions
 #   - IAM OIDC role for GitHub Actions (no long-lived keys!)
+#
+# BUGS FIXED:
+#   1. Only one EC2 instance was defined ("bot") but two are needed (staging
+#      and production).  Added aws_instance.staging and aws_instance.production.
+#   2. Output names did not match what the README and CI/CD scripts expect:
+#        bot_public_ip       → removed (ambiguous)
+#        ecr_repository_url  → kept, also aliased as ecr_registry for CI/CD
+#        github_actions_role → renamed to deploy_role_arn (matches README + CI)
+#      Added: staging_ip, production_ip (expected by CI/CD and README).
 # =============================================================================
 
 terraform {
@@ -21,11 +33,10 @@ terraform {
 
   # Store state in S3 — never local in production
   backend "s3" {
-    bucket = "myorg-terraform-state"
-    key    = "deploy-bot/terraform.tfstate"
-    region = "us-east-1"
-    encrypt = true
-    # Enable DynamoDB locking to prevent concurrent applies
+    bucket         = "myorg-terraform-state"
+    key            = "deploy-bot/terraform.tfstate"
+    region         = "us-east-1"
+    encrypt        = true
     dynamodb_table = "terraform-state-lock"
   }
 }
@@ -152,8 +163,8 @@ resource "aws_iam_role_policy" "ec2_ecr_policy" {
     Version = "2012-10-17"
     Statement = [
       {
-        Effect   = "Allow"
-        Action   = [
+        Effect = "Allow"
+        Action = [
           "ecr:GetDownloadUrlForLayer",
           "ecr:BatchGetImage",
           "ecr:GetAuthorizationToken"
@@ -180,11 +191,11 @@ resource "aws_ecr_repository" "app" {
   image_tag_mutability = "MUTABLE"
 
   image_scanning_configuration {
-    scan_on_push = true  # Automatically scan for CVEs on every push
+    scan_on_push = true
   }
 
   lifecycle {
-    prevent_destroy = true  # Don't accidentally nuke your image registry
+    prevent_destroy = true
   }
 }
 
@@ -196,33 +207,19 @@ resource "aws_ecr_lifecycle_policy" "cleanup" {
       rulePriority = 1
       description  = "Keep only 10 images per environment prefix"
       selection = {
-        tagStatus   = "tagged"
+        tagStatus     = "tagged"
         tagPrefixList = ["staging-", "production-"]
-        countType   = "imageCountMoreThan"
-        countNumber = 10
+        countType     = "imageCountMoreThan"
+        countNumber   = 10
       }
       action = { type = "expire" }
     }]
   })
 }
 
-# ── EC2 Instance ───────────────────────────────────────────────────────────────
-resource "aws_instance" "bot" {
-  ami                    = data.aws_ami.ubuntu.id
-  instance_type          = var.ec2_instance_type
-  subnet_id              = aws_subnet.public.id
-  vpc_security_group_ids = [aws_security_group.bot_sg.id]
-  key_name               = aws_key_pair.deploy.key_name
-  iam_instance_profile   = aws_iam_instance_profile.ec2_profile.name
-
-  root_block_device {
-    volume_size = 30
-    volume_type = "gp3"
-    encrypted   = true
-  }
-
-  # Bootstrap script — installs Docker and starts the bot
-  user_data = <<-EOF
+# ── Shared user-data bootstrap script ─────────────────────────────────────────
+locals {
+  bootstrap_script = <<-EOF
     #!/bin/bash
     apt-get update -y
     apt-get install -y docker.io docker-compose awscli git
@@ -238,10 +235,55 @@ resource "aws_instance" "bot" {
     mkdir -p /opt/myapp /var/lib/deploybot /var/log/deploybot
     chown deploy:deploy /opt/myapp /var/lib/deploybot /var/log/deploybot
   EOF
+}
+
+# ── EC2 Instance: Staging ──────────────────────────────────────────────────────
+# BUG FIX: the original only created one instance ("bot").  The README and
+# CI/CD pipeline expect separate staging and production servers with distinct
+# IPs exposed as staging_ip and production_ip outputs.  Added staging instance.
+resource "aws_instance" "staging" {
+  ami                    = data.aws_ami.ubuntu.id
+  instance_type          = var.ec2_instance_type
+  subnet_id              = aws_subnet.public.id
+  vpc_security_group_ids = [aws_security_group.bot_sg.id]
+  key_name               = aws_key_pair.deploy.key_name
+  iam_instance_profile   = aws_iam_instance_profile.ec2_profile.name
+
+  root_block_device {
+    volume_size = 30
+    volume_type = "gp3"
+    encrypted   = true
+  }
+
+  user_data = local.bootstrap_script
 
   tags = {
-    Name        = "${var.project_name}"
-    Environment = var.environment
+    Name        = "${var.project_name}-staging"
+    Environment = "staging"
+    ManagedBy   = "Terraform"
+  }
+}
+
+# ── EC2 Instance: Production ───────────────────────────────────────────────────
+resource "aws_instance" "production" {
+  ami                    = data.aws_ami.ubuntu.id
+  instance_type          = var.ec2_instance_type
+  subnet_id              = aws_subnet.public.id
+  vpc_security_group_ids = [aws_security_group.bot_sg.id]
+  key_name               = aws_key_pair.deploy.key_name
+  iam_instance_profile   = aws_iam_instance_profile.ec2_profile.name
+
+  root_block_device {
+    volume_size = 30
+    volume_type = "gp3"
+    encrypted   = true
+  }
+
+  user_data = local.bootstrap_script
+
+  tags = {
+    Name        = "${var.project_name}-production"
+    Environment = "production"
     ManagedBy   = "Terraform"
   }
 }
@@ -252,7 +294,11 @@ data "aws_iam_openid_connect_provider" "github" {
 }
 
 resource "aws_iam_role" "github_actions" {
-  name = "GitHubActions-${var.project_name}"
+  # BUG FIX: renamed from "GitHubActions-${var.project_name}" — the output was
+  # exposed as `github_actions_role` but README and CI/CD reference it as
+  # `deploy_role_arn`.  The role name itself is cosmetic; the output name is
+  # what matters and is fixed in the Outputs section below.
+  name = "${var.project_name}-github-actions-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -281,8 +327,8 @@ resource "aws_iam_role_policy" "github_actions_policy" {
     Version = "2012-10-17"
     Statement = [
       {
-        Effect   = "Allow"
-        Action   = [
+        Effect = "Allow"
+        Action = [
           "ecr:GetAuthorizationToken",
           "ecr:BatchCheckLayerAvailability",
           "ecr:GetDownloadUrlForLayer",
@@ -299,6 +345,35 @@ resource "aws_iam_role_policy" "github_actions_policy" {
 }
 
 # ── Outputs ────────────────────────────────────────────────────────────────────
-output "bot_public_ip"        { value = aws_instance.bot.public_ip }
-output "ecr_repository_url"   { value = aws_ecr_repository.app.repository_url }
-output "github_actions_role"  { value = aws_iam_role.github_actions.arn }
+# BUG FIX: original outputs used names that didn't match what the README
+# (Part 4) and CI/CD secrets (Part 6) expect.  Fixed:
+#   bot_public_ip       → removed (ambiguous; use staging_ip / production_ip)
+#   ecr_repository_url  → kept; also exposed as ecr_registry (CI/CD secret name)
+#   github_actions_role → renamed to deploy_role_arn (README + CI/CD secret name)
+# Added:
+#   staging_ip, production_ip (referenced in README Part 4 and CI/CD secrets)
+
+output "staging_ip" {
+  description = "Public IP of the staging EC2 instance"
+  value       = aws_instance.staging.public_ip
+}
+
+output "production_ip" {
+  description = "Public IP of the production EC2 instance"
+  value       = aws_instance.production.public_ip
+}
+
+output "ecr_registry" {
+  description = "ECR registry URL (use as ECR_REGISTRY GitHub secret)"
+  value       = aws_ecr_repository.app.repository_url
+}
+
+output "ecr_repository_url" {
+  description = "Full ECR repository URL"
+  value       = aws_ecr_repository.app.repository_url
+}
+
+output "deploy_role_arn" {
+  description = "IAM role ARN for GitHub Actions (use as AWS_DEPLOY_ROLE_ARN GitHub secret)"
+  value       = aws_iam_role.github_actions.arn
+}

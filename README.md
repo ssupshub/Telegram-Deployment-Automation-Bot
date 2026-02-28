@@ -16,7 +16,7 @@ environments — with RBAC, audit logging, real-time log streaming, health check
 │       │  /deploy production                                             │
 │       ▼                                                                 │
 │  ┌─────────────┐    RBAC     ┌──────────────────┐   Audit Log           │
-│  │  Bot Handler│ ──────────► │  Role Check      │ ──────────► File/S3   │ 
+│  │  Bot Handler│ ──────────► │  Role Check      │ ──────────► File/S3   │
 │  │  (PTB)      │             │  (admin_ids list)│                       │
 │  └─────────────┘             └────────┬─────────┘                       │
 │                                       │ ✅ Authorized                   │
@@ -58,7 +58,7 @@ environments — with RBAC, audit logging, real-time log streaming, health check
 │                     ▼                                   ▼               │
 │             ┌──────────────┐                   ┌─────────────────┐      │
 │             │ Write state  │                   │  Auto-Rollback  │      │
-│             │ Notify user ✅│                 │  Notify user ❌ │      │
+│             │ Notify user ✅│                  │  Notify user ❌ │      │
 │             └──────────────┘                   └─────────────────┘      │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
@@ -121,7 +121,7 @@ telegram-deploy-bot/
 
 CloudShell is a free terminal that lives inside the AWS Console. Click the **`>_` icon** in the top navigation bar of any AWS page and a terminal opens in your browser — already logged into your AWS account. No installs, no configuration.
 
-**CloudShell comes with:** Python 3, Git, AWS CLI, pip, curl, ssh, ssh-keygen.  
+**CloudShell comes with:** Python 3, Git, AWS CLI, pip, curl, ssh, ssh-keygen.
 **You only need to install:** Terraform (one command, shown in Part 2).
 
 > **Tip:** CloudShell saves your files between sessions. If it times out after 20 minutes of inactivity, just click `>_` again — your files are still there.
@@ -330,6 +330,7 @@ ADMIN_TELEGRAM_IDS=123456789
 STAGING_TELEGRAM_IDS=123456789
 REGISTRY_URL=123456789.dkr.ecr.us-east-1.amazonaws.com
 REGISTRY_IMAGE=myapp
+AWS_REGION=us-east-1
 STAGING_HOST=54.123.45.67
 PRODUCTION_HOST=54.123.45.89
 EOF
@@ -358,7 +359,7 @@ git push origin develop
 ```
 
 Go to **github.com → your repo → Actions tab** to watch it run. The pipeline will:
-- Run 79 tests
+- Run tests
 - Run the linter
 - Build and push a Docker image to ECR
 - SSH into staging and deploy the container
@@ -795,6 +796,3 @@ Observability:
 → Blue/green: instant full traffic switch between two identical environments,
   near-zero downtime, easy rollback. Canary: gradual traffic shift to new version
   while monitoring metrics, catches regressions with limited blast radius.
-
----
-

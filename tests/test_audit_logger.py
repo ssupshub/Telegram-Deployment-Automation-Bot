@@ -1,22 +1,15 @@
 """
 test_audit_logger.py - Tests for AuditLogger
-===============================================
-Covers: event structure, file persistence, get_recent(), IOError handling.
 """
-
 import json
 import os
-import tempfile
 import pytest
 from audit_logger import AuditLogger
 
-
 @pytest.fixture
 def tmp_log(tmp_path):
-    """Return a fresh AuditLogger writing to a temp file."""
     log_file = str(tmp_path / "audit.log")
     return AuditLogger(log_path=log_file), log_file
-
 
 USER = {"id": 111, "username": "alice", "full_name": "Alice Admin"}
 
@@ -58,7 +51,7 @@ class TestAuditLoggerWrite:
         with open(path) as f:
             event = json.loads(f.readline())
         assert "timestamp" in event
-        assert "T" in event["timestamp"]  # ISO 8601 format
+        assert "T" in event["timestamp"]
 
     def test_multiple_logs_append_as_separate_lines(self, tmp_log):
         logger, path = tmp_log
@@ -72,21 +65,10 @@ class TestAuditLoggerWrite:
         assert events[1]["action"] == "deploy_success"
 
     def test_log_does_not_raise_on_ioerror(self, tmp_path):
-        """
-        If the log directory can't be created or file can't be written,
-        the bot must not crash — it should just log the error.
-
-        We mock Path.mkdir and builtins.open to simulate the failure
-        without touching any real restricted paths. This is portable
-        across all CI environments regardless of filesystem permissions.
-        """
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import patch
         log_path = str(tmp_path / "audit.log")
         audit_logger = AuditLogger(log_path=log_path)
-
-        # Simulate mkdir succeeding but open() raising PermissionError
         with patch("builtins.open", side_effect=OSError("Permission denied")):
-            # Must not raise — error is caught internally and logged
             audit_logger.log(USER, "deploy_started", {})
 
 
@@ -123,6 +105,9 @@ class TestGetRecent:
         logger.log(USER, "good_event", {})
         with open(path, "a") as f:
             f.write("this is not json\n")
-        # Should not raise — corrupt lines are skipped
+        # BUG FIX: corrupt line should be skipped, not cause [] to be returned
         result = logger.get_recent()
         assert isinstance(result, list)
+        # BUG FIX VERIFICATION: the valid event should still be present
+        assert len(result) == 1
+        assert result[0]["action"] == "good_event"

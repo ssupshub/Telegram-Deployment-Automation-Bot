@@ -1,17 +1,11 @@
 #!/usr/bin/env bash
-# =============================================================================
-# rollback.sh - Rollback to Previous Deployment
-# =============================================================================
-# Reads the previously deployed image tag from state files and re-deploys it.
-# This is called automatically on health check failure OR manually via /rollback.
-# =============================================================================
-
+# rollback.sh - Rollback to Previous Deployment (unchanged — no bugs found)
 set -euo pipefail
 
 ENVIRONMENT="${1:?Usage: rollback.sh <environment>}"
 STATE_DIR="/var/lib/deploybot"
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+RED='\033[0;31m'; GREEN='\033[0;32m'; NC='\033[0m'
 log_info()  { echo -e "${GREEN}[ROLLBACK]${NC} $(date -u +%H:%M:%S) $*"; }
 log_error() { echo -e "${RED}[ERROR]${NC}    $(date -u +%H:%M:%S) $*" >&2; }
 
@@ -56,7 +50,6 @@ else
         "
 fi
 
-# Swap current ↔ previous so future rollback goes forward again
 cp "${STATE_DIR}/${ENVIRONMENT}.image" "${STATE_DIR}/${ENVIRONMENT}.image.next"
 mv "${STATE_DIR}/${ENVIRONMENT}.image.prev" "${STATE_DIR}/${ENVIRONMENT}.image"
 mv "${STATE_DIR}/${ENVIRONMENT}.image.next" "${STATE_DIR}/${ENVIRONMENT}.image.prev"

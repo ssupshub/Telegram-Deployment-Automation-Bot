@@ -47,7 +47,6 @@ def require_role(role: Role):
 
             user_id = user.id
 
-            # Determine if user passes the role check
             authorized = False
             if role == Role.STAGING:
                 authorized = Config.is_authorized(user_id)

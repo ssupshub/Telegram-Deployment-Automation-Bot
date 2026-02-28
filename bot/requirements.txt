@@ -1,11 +1,4 @@
-# Core bot framework
 python-telegram-bot==21.3
-
-# Async HTTP for health checks
 aiohttp==3.9.5
-
-# Environment variable management
 python-dotenv==1.0.1
-
-# For Prometheus metrics exposure (optional)
 prometheus-client==0.20.0

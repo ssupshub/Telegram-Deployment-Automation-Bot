@@ -22,14 +22,11 @@ WORKDIR /app
 
 # Install runtime dependencies only
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    # For deploy scripts:
     docker.io \
     curl \
     openssh-client \
     git \
     awscli \
-    # kubectl (optional — comment out if not using k8s)
-    # kubectl \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy Python packages from builder
@@ -54,7 +51,10 @@ ENV PATH="/home/botuser/.local/bin:${PATH}"
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 
-# Health check for the bot container itself
+# Health check — verifies the Python environment is intact.
+# Note: this only checks that the telegram library imports correctly,
+# not that the bot is actively polling. For deeper health checks,
+# expose a /health HTTP endpoint from the bot process itself.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "import telegram; print('ok')" || exit 1
 
