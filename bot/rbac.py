@@ -1,7 +1,6 @@
 """
 rbac.py - Role-Based Access Control
 =====================================
-Provides a decorator to gate command handlers by role.
 
 Roles (hierarchical):
   ADMIN   → can do everything (production deploy, rollback, staging)
