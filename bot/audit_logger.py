@@ -16,13 +16,6 @@ at module level in bot.py) never touches the filesystem — which is
 essential for running tests in sandboxed CI environments like GitHub Actions
 where /var/log/deploybot doesn't exist and can't be created.
 
-BUGS FIXED:
-  - get_recent() caught FileNotFoundError and JSONDecodeError in the same
-    except clause and returned [] for both.  A single corrupt line therefore
-    caused ALL events to be silently discarded.
-    Fix: catch FileNotFoundError separately (return []).  For JSONDecodeError,
-    skip only the offending line and collect the rest so callers still receive
-    the valid events.
 """
 
 import json
