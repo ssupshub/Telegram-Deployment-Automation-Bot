@@ -18,15 +18,6 @@
 #   0 = success
 #   1 = failure (triggers auto-rollback in bot)
 #
-# BUGS FIXED:
-#   Health-check loop off-by-one:
-#     The original checked `if [[ ${ATTEMPT} -ge ${MAX_RETRIES} ]]; then exit 1`
-#     INSIDE the while loop, AFTER the sleep.  On the last iteration the flow
-#     was: attempt++, HTTP check fails, sleep, THEN check attempt>=max → exit 1.
-#     This meant the loop always slept one extra time on the final attempt and
-#     the log said "attempt 10/10 — waiting 10s" before exiting, which is
-#     misleading (we already know we're done).
-#
 #     Fix: check the exhaustion condition at the TOP of the loop body, before
 #     the sleep.  If we've already used all retries, exit immediately without
 #     an extra sleep.  The structure is now:
