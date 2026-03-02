@@ -12,16 +12,6 @@ SECURITY NOTE: All shell commands use a fixed argument list passed to
 asyncio.create_subprocess_exec (never shell=True with user input).
 This prevents command injection attacks completely.
 
-BUGS FIXED:
-  - get_latest_commit() now honours the `branch` parameter instead of ignoring it.
-  - Commit hash validation rewritten as a clear explicit check instead of the
-    confusing generator-filter form that was hard to reason about.
-  - AWS_REGION added to _safe_env() so ECR login works when the region is not
-    us-east-1 (the deploy.sh script uses ${AWS_REGION:-us-east-1}, meaning a
-    misconfigured region silently fell back to the wrong region).
-  - run_deployment() now also yields the exit-code error line *before* the
-    async-for loop exits, so callers that check for "ERROR" in streamed lines
-    will reliably detect failures regardless of what the script printed.
 """
 
 import asyncio
