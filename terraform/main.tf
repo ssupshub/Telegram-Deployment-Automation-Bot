@@ -11,14 +11,6 @@
 #   - IAM role for EC2 with ECR pull permissions
 #   - IAM OIDC role for GitHub Actions (no long-lived keys!)
 #
-# BUGS FIXED:
-#   1. Only one EC2 instance was defined ("bot") but two are needed (staging
-#      and production).  Added aws_instance.staging and aws_instance.production.
-#   2. Output names did not match what the README and CI/CD scripts expect:
-#        bot_public_ip       → removed (ambiguous)
-#        ecr_repository_url  → kept, also aliased as ecr_registry for CI/CD
-#        github_actions_role → renamed to deploy_role_arn (matches README + CI)
-#      Added: staging_ip, production_ip (expected by CI/CD and README).
 # =============================================================================
 
 terraform {
