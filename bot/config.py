@@ -2,15 +2,6 @@
 config.py - Centralized configuration from environment variables.
 Never hardcode secrets. All sensitive values come from the environment.
 
-BUGS FIXED:
-  - Class-level string attributes like _ADMIN_IDS_RAW are evaluated once at
-    import time.  This means tests that call monkeypatch.setenv() after the
-    module is first imported get stale values.  The fix is to read those
-    environment variables inside the @classmethod bodies so they are always
-    current.  The existing reload_config() workaround in the tests still works,
-    but it is no longer necessary.
-  - AWS_REGION was missing entirely; it is needed by deploy.sh for ECR login
-    and is now exposed via Config.AWS_REGION.
 """
 
 import os
