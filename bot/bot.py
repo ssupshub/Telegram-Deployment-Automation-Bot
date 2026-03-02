@@ -7,32 +7,6 @@ Supports staging/production deployments, rollbacks, and real-time logs.
 Architecture:
   Telegram → Bot Handler → RBAC Check → Deployment Script → Health Check → Notify
 
-BUGS FIXED:
-  1. send_chunked: MarkdownV2 code-block wrapping.
-     The original used ParseMode.MARKDOWN_V2 with triple-backtick fences.
-     MarkdownV2 requires special chars (-, ., !, etc.) to be escaped even
-     inside code spans.  Switched to ParseMode.MARKDOWN (legacy) for log
-     output which is freeform text, or escape the content properly.
-     Simple fix: use HTML parse mode for the chunked log output so we don't
-     have to escape every shell character.
-
-  2. _run_deployment: success detection was string-based and fragile.
-     "ERROR" / "FAILED" inside a log message like "[INFO] Checking ERROR.log"
-     would falsely mark a deploy as failed.  The deployment.py generator now
-     always emits a sentinel line starting with "ERROR:" on non-zero exit, so
-     we check specifically for that prefix.  Additionally the `success` flag is
-     now updated per-line inside the loop so the final status is always correct.
-
-  3. handle_callback: callback_data.split(":") truncated the commit hash if it
-     ever contained a colon.  Use maxsplit=2 so everything after the second ":"
-     is treated as the commit hash.
-
-  4. cmd_rollback: streaming rollback logs but never checking them for errors
-     meant a failed rollback looked like success.  Added failure detection.
-
-  5. Auto-rollback in _run_deployment: silently discarded all rollback output
-     with `pass`.  Now streams rollback output back to the user so they can
-     see what happened.
 """
 
 import asyncio
