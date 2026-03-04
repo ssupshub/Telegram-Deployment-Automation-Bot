@@ -387,6 +387,3 @@ Move file-based state to Redis or DynamoDB, add a per-environment distributed lo
 
 **"How do you prevent command injection?"**
 Arguments are always passed as a list to `asyncio.create_subprocess_exec` — never interpolated into a shell string. Environment names are validated against a `frozenset` allowlist before reaching any subprocess call. Commit hashes are matched against a `^[0-9a-f]{4,40}$` regex. Both checks run independently in `deployment.py` and in `deploy.sh`.
-
-**"What's the difference between blue/green and canary?"**
-Blue/green is an instant, atomic traffic switch between two full environments — near-zero downtime and trivially reversible, but you only catch problems after the full cutover. Canary is a gradual traffic shift that exposes the new version to a small percentage of real users first, giving you real-world signal before committing — at the cost of complexity and a longer rollout window.
