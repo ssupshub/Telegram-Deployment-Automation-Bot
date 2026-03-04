@@ -402,7 +402,10 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 def main():
     """Initialize and start the bot."""
     Config.validate()  # fail fast on missing required config
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+
+    # FIX: use Config.get_telegram_bot_token() — the single, canonical way to
+    # read the token, replacing the ambiguous dual @property / class-attribute.
+    token = Config.get_telegram_bot_token()
     if not token:
         raise ValueError("TELEGRAM_BOT_TOKEN not set in environment")
 
@@ -419,8 +422,6 @@ def main():
     logger.info("🤖 Deployment bot starting...")
     app.run_polling(drop_pending_updates=True)
 
-
-import os  # noqa: E402 — needed for main()
 
 if __name__ == "__main__":
     main()

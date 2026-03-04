@@ -92,12 +92,10 @@ Bot: 🚫 Access denied. You don't have permission to deploy to production.
 
 ## 🔐 Security You Get for Free
 
-You don't have to think about any of this — it's already built in.
-
-- **Role-based access** — only your Telegram ID can deploy to production. No one else, ever.
-- **Confirmation dialogs** — production deploys require you to click Confirm. No accidental deploys.
+- **Role-based access** — only your Telegram ID can deploy to production.
+- **Confirmation dialogs** — production deploys require you to click Confirm.
 - **Input validation** — the bot rejects any malformed commands before they reach the server.
-- **No stored credentials** — uses AWS OIDC. No passwords or keys floating around.
+- **No stored credentials** — uses AWS OIDC.
 - **Full audit log** — every deploy, rollback, and denial is logged with who did it and when.
 
 ---
@@ -113,30 +111,7 @@ The bot health-checks your server after every deploy. If it doesn't come back he
 📣 You have been notified on Telegram
 ```
 
-You don't have to watch the deploy. You don't have to babysit it.
-**If anything goes wrong, it fixes itself and tells you.**
-
----
-
-## 👨‍👩‍👧‍👦 Who Benefits Most
-
-### Solo Developer
-> You're the only one managing the server. Now you can deploy from your phone
-> while travelling, without ever opening a terminal again.
-
-### Small Team (2–10 devs)
-> Give staging access to everyone. Keep production locked to leads only.
-> Everyone sees the same `/status`. No more "wait, what's deployed right now?"
-
-### Team Lead / Tech Lead
-> You approve production deploys by clicking a button in Telegram.
-> You get notified instantly when anything deploys or fails.
-> You can rollback in 30 seconds without waking anyone up.
-
-### DevOps / Platform Engineer
-> Automates the most repetitive part of your day.
-> Replaces a manual runbook with a single command.
-> Gives non-technical stakeholders visibility without giving them SSH access.
+You don't have to watch the deploy. **If anything goes wrong, it fixes itself and tells you.**
 
 ---
 
@@ -153,28 +128,6 @@ Assuming 2 deploys per day, 5 days a week:
 | **Total** | | | **~272 min/week** |
 
 > That's roughly **4.5 hours saved every week** — just on deployments.
-
----
-
-## 🆚 Compared to Other Approaches
-
-| Approach | Setup Time | Deploy From Phone | Auto-Rollback | Access Control | Cost |
-|----------|-----------|-------------------|---------------|----------------|------|
-| **This Bot** | ~2 hours | ✅ Yes | ✅ Yes | ✅ Yes | Free |
-| Manual SSH | None | ❌ No | ❌ No | ❌ No | Free |
-| GitHub Actions only | 1–2 hours | ⚠️ Via browser | ❌ No | ⚠️ Limited | Free |
-| AWS CodeDeploy | Days | ⚠️ Via console | ⚠️ Manual | ✅ Yes | Paid |
-| Full CI/CD platform (e.g. Spinnaker) | Weeks | ✅ Yes | ✅ Yes | ✅ Yes | Expensive |
-
-**The bot gives you enterprise-grade deployment control at zero cost, in an afternoon.**
-
----
-
-## 💬 The One-Line Summary
-
-> You set it up once. Then for every deployment, forever, you just open Telegram and type `/deploy production`.
-> The bot handles everything else — building, pushing, deploying, health checking, and rolling back if needed.
-> You get notified when it's done. That's it.
 
 ---
 

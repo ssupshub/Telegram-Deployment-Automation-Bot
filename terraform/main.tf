@@ -2,15 +2,11 @@
 # terraform/main.tf
 # Provisions AWS infrastructure for the Telegram Deployment Bot:
 #   - VPC with public subnet
-#   - EC2 instances: one for staging, one for production  (BUG FIX: original
-#     only created one instance named "bot", but the README and CI/CD pipeline
-#     reference both staging_ip and production_ip outputs — the second server
-#     was simply missing)
+#   - EC2 instances: one for staging, one for production
 #   - Security Group (SSH + HTTPS only)
 #   - ECR repository for Docker images
 #   - IAM role for EC2 with ECR pull permissions
 #   - IAM OIDC role for GitHub Actions (no long-lived keys!)
-#
 # =============================================================================
 
 terraform {
@@ -230,9 +226,6 @@ locals {
 }
 
 # ── EC2 Instance: Staging ──────────────────────────────────────────────────────
-# BUG FIX: the original only created one instance ("bot").  The README and
-# CI/CD pipeline expect separate staging and production servers with distinct
-# IPs exposed as staging_ip and production_ip outputs.  Added staging instance.
 resource "aws_instance" "staging" {
   ami                    = data.aws_ami.ubuntu.id
   instance_type          = var.ec2_instance_type
@@ -286,10 +279,6 @@ data "aws_iam_openid_connect_provider" "github" {
 }
 
 resource "aws_iam_role" "github_actions" {
-  # BUG FIX: renamed from "GitHubActions-${var.project_name}" — the output was
-  # exposed as `github_actions_role` but README and CI/CD reference it as
-  # `deploy_role_arn`.  The role name itself is cosmetic; the output name is
-  # what matters and is fixed in the Outputs section below.
   name = "${var.project_name}-github-actions-role"
 
   assume_role_policy = jsonencode({
@@ -337,14 +326,6 @@ resource "aws_iam_role_policy" "github_actions_policy" {
 }
 
 # ── Outputs ────────────────────────────────────────────────────────────────────
-# BUG FIX: original outputs used names that didn't match what the README
-# (Part 4) and CI/CD secrets (Part 6) expect.  Fixed:
-#   bot_public_ip       → removed (ambiguous; use staging_ip / production_ip)
-#   ecr_repository_url  → kept; also exposed as ecr_registry (CI/CD secret name)
-#   github_actions_role → renamed to deploy_role_arn (README + CI/CD secret name)
-# Added:
-#   staging_ip, production_ip (referenced in README Part 4 and CI/CD secrets)
-
 output "staging_ip" {
   description = "Public IP of the staging EC2 instance"
   value       = aws_instance.staging.public_ip

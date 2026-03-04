@@ -28,34 +28,25 @@ A production-ready, secure Telegram bot for triggering deployments to staging an
 │                              │ DeploymentManager│                       │
 │                              │  subprocess exec │                       │
 │                              └────────┬─────────┘                       │
-│                                       │                                 │
-│          ┌────────────────────────────┼────────────────────┐            │
-│          │                            │                    │            │
-│          ▼                            ▼                    ▼            │
-│   ┌─────────────┐           ┌──────────────────┐  ┌─────────────┐       │
-│   │ Git Pull    │           │  Docker Build    │  │ Push to ECR │       │
-│   │ (GitHub)    │           │  + Tag + Label   │  │ (AWS)       │       │
-│   └─────────────┘           └──────────────────┘  └──────┬──────┘       │
-│                                                          │              │
-│                    ┌─────────▼────────────────────────┐                 │
-│                    │           DEPLOY TARGET          │                 │
-│                    │  ┌─────────────┐  ┌───────────┐  │                 │
-│                    │  │Docker Compose│  │Kubernetes│  │                 │
-│                    │  │(SSH deploy) │  │(kubectl)  │  │                 │
-│                    │  └─────────────┘  └───────────┘  │                 │
-│                    └──────────────────────────────────┘                 │
-│                                       │                                 │
-│                              ┌────────▼─────────┐                       │
-│                              │  Health Check    │                       │
-│                              │  (retry loop)    │                       │
-│                              └────────┬─────────┘                       │
-│                              ✅ Pass  │  ❌ Fail                       │
-│                     ┌─────────────────┴─────────────────┐               │
-│                     ▼                                   ▼               │
-│             ┌──────────────┐                   ┌─────────────────┐      │
-│             │ Write state  │                   │  Auto-Rollback  │      │
-│             │ Notify user ✅│                  │  Notify user ❌ │     │
-│             └──────────────┘                   └─────────────────┘      │
+│                    ┌──────────────────┼──────────────────┐              │
+│                    ▼                  ▼                  ▼              │
+│             ┌───────────┐  ┌──────────────────┐  ┌────────────┐        │
+│             │ Git Pull  │  │  Docker Build    │  │ Push to ECR│        │
+│             └───────────┘  └──────────────────┘  └─────┬──────┘        │
+│                                                         │               │
+│                    ┌────────────────────────────────────┘               │
+│                    ▼                                                     │
+│             ┌──────────────────┐                                         │
+│             │  Health Check   │                                         │
+│             │  (retry loop)   │                                         │
+│             └────────┬────────┘                                         │
+│              ✅ Pass │  ❌ Fail                                         │
+│        ┌─────────────┴──────────────┐                                   │
+│        ▼                            ▼                                   │
+│  ┌───────────────┐         ┌─────────────────┐                          │
+│  │ Notify user ✅│         │  Auto-Rollback  │                          │
+│  └───────────────┘         │  Notify user ❌ │                          │
+│                             └─────────────────┘                          │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -82,8 +73,9 @@ telegram-deploy-bot/
 │   ├── main.tf                 # EC2 + ECR + IAM + VPC + OIDC
 │   └── destroy.sh              # Safe teardown of all AWS resources
 │
-├── docs/                       # Extended documentation
-│   └── install-guide.docx      # Step-by-step installation guide
+├── docs/                       # Documentation
+│   ├── INSTALLATION.md         # Step-by-step installation guide
+│   └── BENEFITS.md             # Why use this bot
 │
 ├── nginx/                      # Reverse proxy (webhook mode)
 │   └── nginx.conf
@@ -98,6 +90,7 @@ telegram-deploy-bot/
 ├── Dockerfile                  # Multi-stage Docker build for the bot
 ├── docker-compose.yml          # Run the bot + supporting services
 ├── .env.example                # Environment variable template
+├── pytest.ini                  # Pytest configuration
 └── README.md
 ```
 
@@ -105,11 +98,9 @@ telegram-deploy-bot/
 
 ## Getting Started
 
-> 📖 **Full step-by-step installation instructions are in [`docs/install-guide.docx`](docs/install-guide.docx)**
->
-> The guide covers everything from creating your Telegram bot and provisioning AWS infrastructure with Terraform, to configuring GitHub Secrets, setting up environments with approval gates, and deploying your first build. No prior AWS or Telegram experience required.
+> 📖 **Full step-by-step installation instructions are in [`docs/INSTALLATION.md`](docs/INSTALLATION.md)**
 
-**Prerequisites at a glance:**
+**Prerequisites:**
 
 - An AWS account — [console.aws.amazon.com](https://console.aws.amazon.com) (free tier works)
 - A GitHub account — [github.com](https://github.com)
@@ -125,7 +116,7 @@ telegram-deploy-bot/
 | `ECR_REGISTRY` | `terraform output ecr_registry` |
 | `AWS_DEPLOY_ROLE_ARN` | `terraform output deploy_role_arn` |
 | `STAGING_SSH_KEY` | Contents of `~/.ssh/deploy_key` |
-| `PRODUCTION_SSH_KEY` | Contents of `~/.ssh/deploy_key` |
+| `PRODUCTION_SSH_KEY` | Contents of `~/.ssh/deploy_key` (same file) |
 | `STAGING_HOST` | `terraform output staging_ip` |
 | `PRODUCTION_HOST` | `terraform output production_ip` |
 | `STAGING_HEALTH_URL` | `http://<staging-ip>/health` |
@@ -150,22 +141,15 @@ telegram-deploy-bot/
 
 ### Role-Based Access Control (RBAC)
 
-Two roles are defined, controlled entirely by Telegram user IDs set in environment variables:
-
 ```
 ADMIN  → full access: production deploy, rollback, staging
          set via: ADMIN_TELEGRAM_IDS=123456789,987654321
 
 STAGING → limited access: staging deploy + /status only
           set via: STAGING_TELEGRAM_IDS=111222333
-          (admins are automatically included)
 ```
 
-The `@require_role` decorator runs the ID check in Python before any deployment code is reached. Role is also re-verified on every inline button callback, since callbacks can be replayed by a determined attacker.
-
 ### Command Injection Prevention
-
-All subprocess calls use a fixed argument list — `shell=True` with user input is never used:
 
 ```python
 # ❌ DANGEROUS — shell injection possible
@@ -175,23 +159,22 @@ subprocess.run(f"deploy.sh {user_input}", shell=True)
 subprocess.run(["/app/scripts/deploy.sh", environment, commit])
 ```
 
-Environment names are additionally validated against a strict allowlist (`staging` / `production`) and commit hashes are validated as 4–40 hex characters before either is passed to any script.
+### F811 Fix — Config.get_telegram_bot_token()
 
-### Secret Management
+The original code had a Ruff F811 error (redefinition of unused name) because
+`TELEGRAM_BOT_TOKEN` was defined twice in the same class body — once as a
+`@property` and once as a class-level `str` attribute. The class attribute
+silently overwrote the property, making the property unreachable.
 
+**Fix:** both definitions removed and replaced with a single `@classmethod`:
+
+```python
+@classmethod
+def get_telegram_bot_token(cls) -> str:
+    return os.environ.get("TELEGRAM_BOT_TOKEN", "")
 ```
-Development:  .env file (never committed — see .gitignore)
-Production:   AWS Secrets Manager → injected as environment variables
-CI/CD:        GitHub Actions Secrets + OIDC (no long-lived AWS keys stored)
-SSH Keys:     Dedicated deploy keypair, minimal permissions, no sudo
-```
 
-### Principle of Least Privilege
-
-- Bot container runs as a non-root user (`botuser`)
-- EC2 IAM role is scoped to ECR pull + CloudWatch Logs only
-- GitHub Actions authenticates via OIDC — no stored AWS access keys
-- Docker socket mount grants root-equivalent Docker access — see the note in `docker-compose.yml` if this is a concern for your threat model
+This gives one name, one definition, lazy evaluation, and full testability.
 
 ---
 
@@ -207,7 +190,7 @@ User → /deploy production
 2. Fetch latest commit hash from git
          │
          ▼
-3. Confirmation dialog: "Deploy abc1234 to production? [Confirm] [Cancel]"
+3. Confirmation dialog
          │ Confirm clicked
          ▼
 4. Re-verify admin role (callbacks can be replayed)
@@ -229,115 +212,14 @@ User → /deploy production
 
 ---
 
-## Deployment Strategies
-
-### Blue/Green — Zero-Downtime Cutover
-
-Traffic flips atomically from the old version (Blue) to the new version (Green) via a single load balancer rule change. Green is health-checked before any traffic reaches it, and Blue stays warm for an instant rollback.
-
-```bash
-# Swap traffic from Blue to Green (AWS CLI)
-aws elbv2 modify-listener \
-  --listener-arn $LISTENER_ARN \
-  --default-actions Type=forward,TargetGroupArn=$GREEN_TG_ARN
-```
-
-**Best for:** most production deployments — simple, fast, and fully reversible.
-
-### Canary — Gradual Traffic Shift
-
-A small percentage of real traffic is routed to the new version first. If error rates and latency stay within bounds, traffic is gradually increased to 100%. Any degradation triggers a full rollback.
-
-```
-5%  → v2   monitor 10–30 min
-25% → v2   monitor
-50% → v2   monitor
-100% → v2  ✅  or  rollback → v1
-```
-
-Kubernetes implementations typically use Argo Rollouts, Flagger, or Istio virtual services for weighted routing.
-
-**Best for:** high-traffic services where even a brief outage is costly, or when you want real-user signal before full rollout.
-
----
-
-## Monitoring Integration
-
-The bot exposes Prometheus metrics via `prometheus-client`. Key metrics to instrument in `bot.py`:
-
-```python
-from prometheus_client import Counter, Histogram, Gauge
-
-DEPLOY_TOTAL    = Counter("deployments_total", "Total deployments", ["env", "status"])
-DEPLOY_DURATION = Histogram("deployment_duration_seconds", "Deploy time", ["env"])
-HEALTH_UP       = Gauge("health_check_up", "Health check status", ["env"])
-```
-
-Recommended Grafana panels: deployment frequency (bar chart), deployment duration (histogram), success/failure ratio, time-since-last-deploy (single stat), and per-environment health status (red/green indicator).
-
-Example Prometheus alert rules:
-
-```yaml
-groups:
-  - name: deployments
-    rules:
-      - alert: DeploymentFailed
-        expr: increase(deployments_total{status="failed"}[5m]) > 0
-        annotations:
-          summary: "Deployment failed — check Telegram bot logs"
-
-      - alert: HealthCheckDown
-        expr: health_check_up == 0
-        for: 2m
-        annotations:
-          summary: "{{ $labels.env }} health check failing for 2+ minutes"
-```
-
-The `monitoring/prometheus.yml` in this repo is pre-configured to scrape the bot container on port `9090`.
-
----
-
-## Scaling Considerations
-
-The default setup is a single bot instance with file-based state — suitable for small teams. For larger-scale use:
-
-- **State** — move `/var/lib/deploybot` state files to Redis or DynamoDB to support multiple bot instances
-- **Concurrency** — add a distributed lock (`Redis SET NX EX`) per environment to prevent concurrent deploys stepping on each other
-- **Queue** — use SQS or Celery to serialize deploy requests rather than running them in parallel
-- **Webhooks** — switch from polling to Telegram webhooks for sub-second response times; polling is limited to a single running instance
-- **Multi-team** — either expand RBAC within a single bot (simpler to operate) or run one bot per team (full isolation, more overhead)
-
----
-
-## Common Failure Scenarios
-
-| Scenario | Detection | Mitigation |
-|----------|-----------|------------|
-| Deploy script hangs | `asyncio` timeout on subprocess | Kill process, report timeout, trigger rollback |
-| Registry push fails | Non-zero exit from `docker push` | Retry with exponential backoff |
-| SSH connection timeout | Subprocess timeout | Alert user, retry once |
-| Health check never passes | Max retries exceeded | Auto-rollback to previous image |
-| Bot loses Telegram connectivity | PTB polling reconnect logic | Systemd `Restart=always` policy |
-| Container OOM killed | Docker health check fails | Review memory limits in `docker-compose.yml` |
-| Git merge conflict on pull | `git pull` non-zero exit | Alert user, require manual resolution |
-| Bot token compromised | Unauthorized commands arriving | Revoke via @BotFather immediately, rotate |
-| Replay attack on inline buttons | Malicious user re-sends old callback | Role re-verified on every callback handler |
-
----
-
 ## Teardown
-
-To delete all AWS resources created by `terraform/main.tf`, run the safe teardown script:
 
 ```bash
 cd terraform/
-
-bash destroy.sh            # interactive — prompts you to type DESTROY
-bash destroy.sh --dry-run  # print every action without executing anything
-bash destroy.sh --force    # skip the confirmation prompt (CI use)
+bash destroy.sh            # interactive
+bash destroy.sh --dry-run  # preview only
+bash destroy.sh --force    # skip confirmation (CI)
 ```
-
-The script handles dependency ordering (ECR images → instances → IAM → VPC) and bypasses the `prevent_destroy` lifecycle guard on the ECR repository. See [`terraform/destroy.sh`](terraform/destroy.sh) for full details and the list of resources it intentionally leaves untouched (S3 state bucket, DynamoDB lock table, GitHub OIDC provider).
 
 ---
 
@@ -348,31 +230,20 @@ Infrastructure:
 [ ] SSH: disable password auth and root login — key-only
 [ ] Firewall: block all ports except 22 and 443
 [ ] Rotate the SSH deploy key every 90 days
-[ ] Enable AWS Systems Manager Patch Manager for EC2
-[ ] ECR: scan images on push, fail CI builds on CRITICAL CVEs
-[ ] VPC: move bot to a private subnet with a NAT gateway for outbound
+[ ] ECR: scan images on push, fail CI on CRITICAL CVEs
 
 Bot Security:
 [ ] Whitelist Telegram user IDs — never run as a public bot
-[ ] Re-verify permissions on every callback (don't trust cached state)
-[ ] Validate all inputs with strict allow-lists before any subprocess call
-[ ] Never log secrets — audit log user IDs and actions, not tokens
-[ ] Restrict bot token update types via BotFather's token scope settings
+[ ] Re-verify permissions on every callback
+[ ] Validate all inputs with strict allow-lists
+[ ] Never log secrets
 
 Deployment:
 [ ] Require PR approval before merging to main
-[ ] GitHub Environment protection rules: required reviewers for production
-[ ] Sign images with Cosign for supply-chain security
-[ ] Restrict production deploys to business hours (deployment windows)
-[ ] Add post-deploy smoke tests on top of the health check endpoint
-
-Observability:
-[ ] Ship logs to a centralized store (CloudWatch Logs, Datadog, ELK)
-[ ] Alert on deployment failures with on-call runbook links
-[ ] Review audit logs monthly
+[ ] GitHub Environment protection rules for production
+[ ] Add post-deploy smoke tests on top of health check
 ```
 
 ---
-
 
 *Built with Python · Runs on AWS EC2 · Deployed via Docker · Controlled via Telegram*

@@ -15,13 +15,25 @@ class Config:
         """Read an env var at call time (not at import time)."""
         return os.environ.get(key, default)
 
-    @property
-    def TELEGRAM_BOT_TOKEN(self):  # kept as property for backward-compat
-        return os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    @classmethod
+    def get_telegram_bot_token(cls) -> str:
+        """
+        Return the Telegram bot token from the environment.
 
-    # Class-level attribute kept for import-time consumers (e.g. Application.builder).
-    # Tests that need to override this should set the env var before importing bot.py.
-    TELEGRAM_BOT_TOKEN: str = os.environ.get("TELEGRAM_BOT_TOKEN", "")  # type: ignore[assignment]
+        FIX FOR Ruff F811 (redefinition of unused name):
+        The original code defined TELEGRAM_BOT_TOKEN twice in the same class body:
+          1. As a @property (instance-level descriptor)
+          2. As a plain class-level attribute (str)
+
+        Python executes class bodies top-to-bottom, so the class attribute
+        silently overwrote the @property descriptor — meaning the @property
+        was NEVER reachable. Ruff F811 correctly flagged this.
+
+        Fix: remove both conflicting definitions and replace with a single
+        @classmethod. This gives one name, one definition, with lazy env
+        evaluation so monkeypatch.setenv() works in tests without reloading.
+        """
+        return os.environ.get("TELEGRAM_BOT_TOKEN", "")
 
     # ── RBAC ─────────────────────────────────────────────────────────────────
     # BUG FIX: read raw ID strings inside classmethods so that monkeypatch.setenv()

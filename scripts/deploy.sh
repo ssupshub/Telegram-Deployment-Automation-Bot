@@ -17,14 +17,6 @@
 # Exit codes:
 #   0 = success
 #   1 = failure (triggers auto-rollback in bot)
-#
-#     Fix: check the exhaustion condition at the TOP of the loop body, before
-#     the sleep.  If we've already used all retries, exit immediately without
-#     an extra sleep.  The structure is now:
-#       1. increment counter
-#       2. do the HTTP check → break on success
-#       3. if counter >= max → exit 1 (no more retries left, don't sleep)
-#       4. sleep and loop
 # =============================================================================
 
 set -euo pipefail  # Exit on error, undefined vars, pipe failures
@@ -186,13 +178,7 @@ log_info "Polling health endpoint: ${HEALTH_URL}"
 
 # BUG FIX: the original loop checked `ATTEMPT >= MAX_RETRIES` AFTER sleeping,
 # which meant the final failure message was always preceded by an unnecessary
-# sleep and printed "attempt 10/10 — waiting 10s" before exiting.
-#
-# New structure:
-#   1. increment ATTEMPT
-#   2. perform HTTP check → break on HTTP 200
-#   3. if ATTEMPT >= MAX_RETRIES → log and exit (no extra sleep)
-#   4. otherwise sleep and go back to step 1
+# sleep. New structure: check exhaustion BEFORE sleeping.
 while true; do
     ATTEMPT=$((ATTEMPT + 1))
     log_info "Health check attempt ${ATTEMPT}/${MAX_RETRIES}..."

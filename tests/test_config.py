@@ -111,3 +111,23 @@ class TestValidate:
         Config = reload_config()
         with pytest.raises(EnvironmentError, match="REGISTRY_URL"):
             Config.validate()
+
+
+class TestGetTelegramBotToken:
+    def test_returns_token_from_env(self, monkeypatch):
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "9876543210:ABC-test-token")
+        Config = reload_config()
+        assert Config.get_telegram_bot_token() == "9876543210:ABC-test-token"
+
+    def test_returns_empty_string_when_not_set(self, monkeypatch):
+        monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+        Config = reload_config()
+        assert Config.get_telegram_bot_token() == ""
+
+    def test_reflects_env_changes_at_call_time(self, monkeypatch):
+        """Classmethod reads env lazily — value must reflect current env, not import-time snapshot."""
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "first-token")
+        Config = reload_config()
+        assert Config.get_telegram_bot_token() == "first-token"
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "second-token")
+        assert Config.get_telegram_bot_token() == "second-token"

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# rollback.sh - Rollback to Previous Deployment (unchanged — no bugs found)
+# rollback.sh - Rollback to Previous Deployment
 set -euo pipefail
 
 ENVIRONMENT="${1:?Usage: rollback.sh <environment>}"
