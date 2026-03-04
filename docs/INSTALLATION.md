@@ -165,7 +165,7 @@ on linux_amd64
 Run the following in CloudShell, replacing `YOUR_USERNAME` and `YOUR_REPO` with your actual GitHub details:
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/YOUR_REPO.git
+git clone https://github.com/ssupshub/Telegram-Deployment-Automation-Bot.git
 cd YOUR_REPO
 ```
 
