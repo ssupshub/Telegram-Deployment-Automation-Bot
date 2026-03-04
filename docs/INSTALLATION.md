@@ -166,7 +166,7 @@ Run the following in CloudShell, replacing `YOUR_USERNAME` and `YOUR_REPO` with 
 
 ```bash
 git clone https://github.com/ssupshub/Telegram-Deployment-Automation-Bot.git
-cd YOUR_REPO
+cd Telegram-Deployment-Automation-Bot/
 ```
 
 > 💡 **Don't have a repo yet?** Go to [github.com](https://github.com) → **New repository** → upload your project files there first, then come back and clone it.
@@ -206,7 +206,7 @@ Terraform reads the configuration in your project and automatically creates all 
 ### Step 4.1 — Navigate to the Terraform folder
 
 ```bash
-cd ~/YOUR_REPO/terraform
+cd /Telegram-Deployment-Automation-Bot/terraform
 ```
 
 ### Step 4.2 — Initialise Terraform
