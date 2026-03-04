@@ -374,18 +374,5 @@ Observability:
 
 ---
 
-## Interview Talking Points
-
-**"Walk me through how you'd secure this bot."**
-RBAC via allowlisted Telegram user IDs enforced at the decorator level, never `shell=True` with user input, input validation on all arguments, a dedicated deploy SSH keypair with no sudo, OIDC instead of long-lived AWS credentials, non-root container user, and role re-verification on every inline button callback.
-
-**"What happens when a deployment fails?"**
-The health check polls the service endpoint with configurable retries. If all retries are exhausted, `deploy.sh` exits non-zero. The bot detects the error sentinel line in the streamed output, logs the failure, notifies the user, and automatically calls `rollback.sh`, which re-deploys the previous image tag from the state file. Rollback output is streamed back to the user so they can see what happened.
-
-**"How would you scale this to 50 teams?"**
-Move file-based state to Redis or DynamoDB, add a per-environment distributed lock to prevent concurrent deploys, queue deploy requests via SQS or Celery, switch from polling to webhooks for responsiveness, and consider one bot per team for full isolation over a single shared bot with RBAC.
-
-**"How do you prevent command injection?"**
-Arguments are always passed as a list to `asyncio.create_subprocess_exec` — never interpolated into a shell string. Environment names are validated against a `frozenset` allowlist before reaching any subprocess call. Commit hashes are matched against a `^[0-9a-f]{4,40}$` regex. Both checks run independently in `deployment.py` and in `deploy.sh`.
 
 *Built with Python · Runs on AWS EC2 · Deployed via Docker · Controlled via Telegram*
