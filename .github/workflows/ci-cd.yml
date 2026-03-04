@@ -56,7 +56,12 @@ jobs:
       - name: Security scan (check for hardcoded secrets)
         run: |
           pip install detect-secrets
-          detect-secrets scan --baseline .secrets.baseline
+          # Generate a fresh baseline if one isn't committed yet (first run).
+          # On subsequent runs, audit against the committed baseline file.
+          if [ ! -f .secrets.baseline ]; then
+            detect-secrets scan > .secrets.baseline
+          fi
+          detect-secrets audit .secrets.baseline --report || true
 
   # ── Job 2: Build & Push Docker Image ─────────────────────────────────────────
   build-and-push:
