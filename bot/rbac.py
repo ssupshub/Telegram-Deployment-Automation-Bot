@@ -5,13 +5,6 @@ rbac.py - Role-Based Access Control
 Roles (hierarchical):
   ADMIN   → can do everything (production deploy, rollback, staging)
   STAGING → can deploy staging, check status
-
-Usage:
-  @require_role(Role.ADMIN)
-  async def cmd_deploy_production(update, context): ...
-
-  @require_role(Role.STAGING)
-  async def cmd_deploy_staging(update, context): ...
 """
 
 import logging
@@ -19,6 +12,7 @@ from enum import Enum
 from functools import wraps
 
 from telegram import Update
+from telegram.constants import ParseMode
 from telegram.ext import ContextTypes
 
 from config import Config
@@ -34,15 +28,15 @@ class Role(Enum):
 def require_role(role: Role):
     """
     Decorator factory for Telegram command handlers.
-    Checks the user's Telegram ID against the allow-list before executing the command.
-    Unauthorized calls are silently denied and logged.
+    Checks the user's Telegram ID against the allow-list before executing.
+    Unauthorized calls are denied and logged.
     """
     def decorator(func):
         @wraps(func)
         async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
             user = update.effective_user
             if user is None:
-                return  # ignore non-user messages
+                return
 
             user_id = user.id
 
@@ -57,9 +51,13 @@ def require_role(role: Role):
                     "UNAUTHORIZED ACCESS ATTEMPT: user_id=%s username=%s command=%s required_role=%s",
                     user_id, user.username, func.__name__, role.value,
                 )
+                # Fix #9: use HTML parse mode with <code> tags instead of
+                # bare backticks, which render as literal characters when no
+                # parse_mode is set.
                 await update.effective_message.reply_text(
-                    f"🚫 Access denied. This command requires `{role.value}` role.\n"
+                    f"🚫 Access denied. This command requires <code>{role.value}</code> role.\n"
                     f"Contact an admin if you believe this is an error.",
+                    parse_mode=ParseMode.HTML,
                 )
                 return
 
