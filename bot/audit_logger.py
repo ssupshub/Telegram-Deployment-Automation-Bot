@@ -7,15 +7,10 @@ This is your forensic trail: who did what, when, and with which commit.
 Log format: JSON Lines (one JSON object per line) for easy ingestion
 into CloudWatch, ELK, Datadog, etc.
 
-Tamper-detection: In production, ship these logs to an immutable store
-(S3 with Object Lock, CloudWatch Logs, etc.) immediately.
-
-Design note: The log directory is created lazily on first write, NOT in
-__init__. This means importing the module (and instantiating AuditLogger
-at module level in bot.py) never touches the filesystem — which is
-essential for running tests in sandboxed CI environments like GitHub Actions
-where /var/log/deploybot doesn't exist and can't be created.
-
+Design:
+  - Directory creation is lazy (first write), never at import time.
+  - Core event fields are written AFTER metadata expansion so metadata
+    can never silently overwrite timestamp, user_id, or action (fix #11).
 """
 
 import json
@@ -29,46 +24,38 @@ logger = logging.getLogger(__name__)
 class AuditLogger:
     def __init__(self, log_path: str = None):
         from config import Config
-        self.log_path = log_path or Config.AUDIT_LOG_PATH
-        # ⚠️  Do NOT create directories here.
-        # __init__ is called at module import time (bot.py line 39).
-        # Any filesystem call here will fail in CI where /var/log/deploybot
-        # is a restricted path. Directory creation is deferred to _ensure_log_dir()
-        # which is only called when an actual log write is attempted.
+        self.log_path = log_path or Config.audit_log_path()
 
     def _ensure_log_dir(self):
-        """
-        Create the log directory if it doesn't exist.
-        Called lazily before the first write — never at import time.
-        Failures are caught and logged so a missing log dir never crashes the bot.
-        """
         try:
             Path(self.log_path).parent.mkdir(parents=True, exist_ok=True)
         except OSError as e:
             logger.error("Cannot create audit log directory: %s", e)
 
-    def log(self, user: dict, action: str, metadata: dict):
+    def log(self, user: dict, action: str, metadata: dict) -> None:
         """
         Write a structured audit event.
+
+        Fix #11: metadata is spread first, then core fields are written on top,
+        so a metadata key like {"action": "fake"} cannot corrupt the audit trail.
 
         Args:
             user:     {"id": int, "username": str, "full_name": str}
             action:   e.g. "deploy_started", "rollback_completed"
             metadata: arbitrary context, e.g. {"env": "production", "commit": "abc123"}
         """
+        # Fix #11: core fields overwrite any conflicting metadata keys.
         event = {
+            **metadata,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "user_id": user.get("id"),
             "username": user.get("username"),
             "full_name": user.get("full_name"),
             "action": action,
-            **metadata,
         }
 
-        # Always emit to the Python logger (captured by Docker/systemd/CloudWatch)
         logger.info("AUDIT: %s", json.dumps(event))
 
-        # Lazily ensure the directory exists, then write.
         self._ensure_log_dir()
         try:
             with open(self.log_path, "a") as f:
@@ -78,15 +65,8 @@ class AuditLogger:
 
     def get_recent(self, limit: int = 20) -> list:
         """
-        Return the last N audit events (for /history command).
-
-        BUG FIX: the original implementation caught FileNotFoundError and
-        JSONDecodeError in one bare `except` block and returned [] for both.
-        A single malformed line therefore caused ALL events to be lost.
-
-        Fix:
-          • FileNotFoundError → return [] (no log file yet, expected).
-          • JSONDecodeError per line → skip that line, keep the rest.
+        Return the last N audit events.
+        Corrupt lines are skipped individually — one bad line never loses all events.
         """
         try:
             with open(self.log_path) as f:
