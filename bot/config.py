@@ -2,6 +2,11 @@
 config.py - Centralized configuration from environment variables.
 Never hardcode secrets. All sensitive values come from the environment.
 
+Design: ALL values are read lazily via classmethods at call time — never
+frozen at import time. This ensures:
+  - monkeypatch.setenv() in tests works without reloading the module
+  - Docker env-injection timing differences never cause stale reads
+  - Config.validate() and _safe_env() always see the same values
 """
 
 import os
@@ -9,38 +14,15 @@ from typing import Set
 
 
 class Config:
-    # ── Bot Secrets ──────────────────────────────────────────────────────────
-    @classmethod
-    def _get(cls, key: str, default: str = "") -> str:
-        """Read an env var at call time (not at import time)."""
-        return os.environ.get(key, default)
+
+    # ── Bot Token ─────────────────────────────────────────────────────────────
 
     @classmethod
     def get_telegram_bot_token(cls) -> str:
-        """
-        Return the Telegram bot token from the environment.
-
-        FIX FOR Ruff F811 (redefinition of unused name):
-        The original code defined TELEGRAM_BOT_TOKEN twice in the same class body:
-          1. As a @property (instance-level descriptor)
-          2. As a plain class-level attribute (str)
-
-        Python executes class bodies top-to-bottom, so the class attribute
-        silently overwrote the @property descriptor — meaning the @property
-        was NEVER reachable. Ruff F811 correctly flagged this.
-
-        Fix: remove both conflicting definitions and replace with a single
-        @classmethod. This gives one name, one definition, with lazy env
-        evaluation so monkeypatch.setenv() works in tests without reloading.
-        """
+        """Return the Telegram bot token, read lazily from the environment."""
         return os.environ.get("TELEGRAM_BOT_TOKEN", "")
 
     # ── RBAC ─────────────────────────────────────────────────────────────────
-    # BUG FIX: read raw ID strings inside classmethods so that monkeypatch.setenv()
-    # works without reload_config().  The class-level attributes below are
-    # intentionally *not* used; they exist only for static-analysis tools.
-    _ADMIN_IDS_RAW: str = ""    # sentinel; actual value read in admin_ids()
-    _STAGING_IDS_RAW: str = ""  # sentinel; actual value read in staging_ids()
 
     @classmethod
     def _parse_ids(cls, raw: str) -> Set[int]:
@@ -54,12 +36,11 @@ class Config:
 
     @classmethod
     def admin_ids(cls) -> Set[int]:
-        # BUG FIX: read from os.environ every time, not from the stale class attr.
         return cls._parse_ids(os.environ.get("ADMIN_TELEGRAM_IDS", ""))
 
     @classmethod
     def staging_ids(cls) -> Set[int]:
-        """Staging users PLUS all admins (admins are supersets)."""
+        """Staging users PLUS all admins (admins are a superset)."""
         return cls._parse_ids(os.environ.get("STAGING_TELEGRAM_IDS", "")) | cls.admin_ids()
 
     @classmethod
@@ -72,47 +53,111 @@ class Config:
         return user_id in cls.staging_ids()
 
     # ── GitHub / Registry ────────────────────────────────────────────────────
-    GITHUB_REPO: str = os.environ.get("GITHUB_REPO", "myorg/myapp")
-    GITHUB_TOKEN: str = os.environ.get("GITHUB_TOKEN", "")
-    GITHUB_BRANCH_STAGING: str = os.environ.get("GITHUB_BRANCH_STAGING", "develop")
-    GITHUB_BRANCH_PRODUCTION: str = os.environ.get("GITHUB_BRANCH_PRODUCTION", "main")
-
-    REGISTRY_URL: str = os.environ.get("REGISTRY_URL", "")
-    REGISTRY_IMAGE: str = os.environ.get("REGISTRY_IMAGE", "myapp")
-
-    # BUG FIX: AWS_REGION was missing; deploy.sh needs it for ECR login.
-    AWS_REGION: str = os.environ.get("AWS_REGION", "us-east-1")
-
-    # ── Server / SSH ─────────────────────────────────────────────────────────
-    STAGING_HOST: str = os.environ.get("STAGING_HOST", "")
-    PRODUCTION_HOST: str = os.environ.get("PRODUCTION_HOST", "")
-    DEPLOY_USER: str = os.environ.get("DEPLOY_USER", "deploy")
-    SSH_KEY_PATH: str = os.environ.get("SSH_KEY_PATH", "/app/secrets/deploy_key")
-
-    # ── Health Checks ────────────────────────────────────────────────────────
-    STAGING_HEALTH_URL: str = os.environ.get("STAGING_HEALTH_URL", "http://staging.example.com/health")
-    PRODUCTION_HEALTH_URL: str = os.environ.get("PRODUCTION_HEALTH_URL", "http://production.example.com/health")
-    HEALTH_CHECK_TIMEOUT: int = int(os.environ.get("HEALTH_CHECK_TIMEOUT", "30"))
-    HEALTH_CHECK_RETRIES: int = int(os.environ.get("HEALTH_CHECK_RETRIES", "5"))
-
-    # ── Kubernetes (optional) ─────────────────────────────────────────────────
-    USE_KUBERNETES: bool = os.environ.get("USE_KUBERNETES", "false").lower() == "true"
-    KUBE_NAMESPACE: str = os.environ.get("KUBE_NAMESPACE", "default")
-    KUBE_DEPLOYMENT_STAGING: str = os.environ.get("KUBE_DEPLOYMENT_STAGING", "myapp-staging")
-    KUBE_DEPLOYMENT_PRODUCTION: str = os.environ.get("KUBE_DEPLOYMENT_PRODUCTION", "myapp-production")
-
-    # ── Audit Logging ─────────────────────────────────────────────────────────
-    AUDIT_LOG_PATH: str = os.environ.get("AUDIT_LOG_PATH", "/var/log/deploybot/audit.log")
 
     @classmethod
-    def validate(cls):
+    def github_repo(cls) -> str:
+        return os.environ.get("GITHUB_REPO", "myorg/myapp")
+
+    @classmethod
+    def github_token(cls) -> str:
+        return os.environ.get("GITHUB_TOKEN", "")
+
+    @classmethod
+    def github_branch_staging(cls) -> str:
+        return os.environ.get("GITHUB_BRANCH_STAGING", "develop")
+
+    @classmethod
+    def github_branch_production(cls) -> str:
+        return os.environ.get("GITHUB_BRANCH_PRODUCTION", "main")
+
+    @classmethod
+    def registry_url(cls) -> str:
+        return os.environ.get("REGISTRY_URL", "")
+
+    @classmethod
+    def registry_image(cls) -> str:
+        return os.environ.get("REGISTRY_IMAGE", "myapp")
+
+    @classmethod
+    def aws_region(cls) -> str:
+        return os.environ.get("AWS_REGION", "us-east-1")
+
+    # ── Server / SSH ─────────────────────────────────────────────────────────
+
+    @classmethod
+    def staging_host(cls) -> str:
+        return os.environ.get("STAGING_HOST", "")
+
+    @classmethod
+    def production_host(cls) -> str:
+        return os.environ.get("PRODUCTION_HOST", "")
+
+    @classmethod
+    def deploy_user(cls) -> str:
+        return os.environ.get("DEPLOY_USER", "deploy")
+
+    @classmethod
+    def ssh_key_path(cls) -> str:
+        return os.environ.get("SSH_KEY_PATH", "/app/secrets/deploy_key")
+
+    # ── Health Checks ────────────────────────────────────────────────────────
+
+    @classmethod
+    def staging_health_url(cls) -> str:
+        return os.environ.get("STAGING_HEALTH_URL", "http://staging.example.com/health")
+
+    @classmethod
+    def production_health_url(cls) -> str:
+        return os.environ.get("PRODUCTION_HEALTH_URL", "http://production.example.com/health")
+
+    @classmethod
+    def health_check_timeout(cls) -> int:
+        return int(os.environ.get("HEALTH_CHECK_TIMEOUT", "30"))
+
+    @classmethod
+    def health_check_retries(cls) -> int:
+        return int(os.environ.get("HEALTH_CHECK_RETRIES", "5"))
+
+    # ── Deployment ────────────────────────────────────────────────────────────
+
+    @classmethod
+    def deploy_timeout_seconds(cls) -> int:
+        """Max seconds to wait for a deploy/rollback subprocess before killing it."""
+        return int(os.environ.get("DEPLOY_TIMEOUT_SECONDS", "600"))
+
+    # ── Kubernetes (optional) ─────────────────────────────────────────────────
+
+    @classmethod
+    def use_kubernetes(cls) -> bool:
+        return os.environ.get("USE_KUBERNETES", "false").lower() == "true"
+
+    @classmethod
+    def kube_namespace(cls) -> str:
+        return os.environ.get("KUBE_NAMESPACE", "default")
+
+    @classmethod
+    def kube_deployment_staging(cls) -> str:
+        return os.environ.get("KUBE_DEPLOYMENT_STAGING", "myapp-staging")
+
+    @classmethod
+    def kube_deployment_production(cls) -> str:
+        return os.environ.get("KUBE_DEPLOYMENT_PRODUCTION", "myapp-production")
+
+    # ── Audit Logging ─────────────────────────────────────────────────────────
+
+    @classmethod
+    def audit_log_path(cls) -> str:
+        return os.environ.get("AUDIT_LOG_PATH", "/var/log/deploybot/audit.log")
+
+    # ── Validation ────────────────────────────────────────────────────────────
+
+    @classmethod
+    def validate(cls) -> None:
         """Call on startup to fail fast if required config is missing."""
-        # BUG FIX: read directly from env (not stale class attrs) so this works
-        # whether or not the module has been reloaded.
         required = {
-            "TELEGRAM_BOT_TOKEN": os.environ.get("TELEGRAM_BOT_TOKEN", ""),
+            "TELEGRAM_BOT_TOKEN": cls.get_telegram_bot_token(),
             "ADMIN_TELEGRAM_IDS": os.environ.get("ADMIN_TELEGRAM_IDS", ""),
-            "REGISTRY_URL": os.environ.get("REGISTRY_URL", ""),
+            "REGISTRY_URL": cls.registry_url(),
         }
         missing = [k for k, v in required.items() if not v]
         if missing:
