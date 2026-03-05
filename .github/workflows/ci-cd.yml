@@ -42,7 +42,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r bot/requirements.txt
-          pip install pytest pytest-asyncio pytest-mock
+          pip install -r requirements-dev.txt
 
       - name: Run unit tests
         run: |
@@ -50,14 +50,10 @@ jobs:
 
       - name: Run linter
         run: |
-          pip install ruff
           ruff check bot/
 
       - name: Security scan (check for hardcoded secrets)
         run: |
-          pip install detect-secrets
-          # Generate a fresh baseline if one isn't committed yet (first run).
-          # On subsequent runs, audit against the committed baseline file.
           if [ ! -f .secrets.baseline ]; then
             detect-secrets scan > .secrets.baseline
           fi
@@ -117,7 +113,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Image vulnerability scan
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@0.28.0
         with:
           image-ref: ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
           format: table
@@ -149,11 +145,11 @@ jobs:
           DEPLOY_USER: deploy
           IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
         run: |
-          # Write SSH key to temp file
+          # Fix #6: trap ensures key is deleted even if SSH command fails
+          trap 'rm -f /tmp/deploy_key' EXIT
           echo "${SSH_PRIVATE_KEY}" > /tmp/deploy_key
           chmod 600 /tmp/deploy_key
 
-          # SSH into staging server and run deploy
           ssh -i /tmp/deploy_key \
               -o StrictHostKeyChecking=no \
               "${DEPLOY_USER}@${STAGING_HOST}" \
@@ -161,9 +157,6 @@ jobs:
                export IMAGE_TAG=${ECR_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG} && \
                docker compose pull && \
                docker compose up -d --remove-orphans"
-
-          # Clean up key
-          rm -f /tmp/deploy_key
 
       - name: Health check
         run: |
@@ -207,6 +200,8 @@ jobs:
           PRODUCTION_HOST: ${{ secrets.PRODUCTION_HOST }}
           IMAGE_TAG: ${{ needs.build-and-push.outputs.image_tag }}
         run: |
+          # Fix #6: trap ensures key is deleted even if SSH command fails
+          trap 'rm -f /tmp/deploy_key' EXIT
           echo "${SSH_PRIVATE_KEY}" > /tmp/deploy_key
           chmod 600 /tmp/deploy_key
 
@@ -217,8 +212,6 @@ jobs:
                export IMAGE_TAG=${ECR_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG} && \
                docker compose pull && \
                docker compose up -d --remove-orphans"
-
-          rm -f /tmp/deploy_key
 
       - name: Production health check
         run: |
