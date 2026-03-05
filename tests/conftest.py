@@ -29,6 +29,9 @@ def set_env(monkeypatch):
     monkeypatch.setenv("USE_KUBERNETES", "false")
     monkeypatch.setenv("KUBE_NAMESPACE", "default")
     monkeypatch.setenv("AWS_REGION", "us-east-1")
+    monkeypatch.setenv("DEPLOY_TIMEOUT_SECONDS", "600")
+    monkeypatch.setenv("GITHUB_BRANCH_STAGING", "develop")
+    monkeypatch.setenv("GITHUB_BRANCH_PRODUCTION", "main")
 
 
 def make_user(user_id: int, username: str = "testuser"):
