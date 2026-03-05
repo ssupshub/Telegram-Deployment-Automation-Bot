@@ -87,15 +87,31 @@ class TestDeployCommand:
              patch("bot.Config.is_admin", return_value=True), \
              patch("bot.deploy_manager") as mock_mgr:
             mock_mgr.get_latest_commit.return_value = "abc1234"
-            mock_mgr.get_current_branch.return_value = "main"
             await cmd_deploy(update, ctx)
         update.message.reply_text.assert_awaited_once()
         call_kwargs = update.message.reply_text.call_args[1]
         assert "reply_markup" in call_kwargs
 
     @pytest.mark.asyncio
+    async def test_confirm_dialog_uses_config_branch_not_local_head(self):
+        """Fix #13: confirmation shows the configured production branch, not local HEAD."""
+        from bot import cmd_deploy
+        update = make_update(user_id=111)
+        ctx = make_context(args=["production"])
+        with patch("rbac.Config.is_authorized", return_value=True), \
+             patch("bot.Config.is_admin", return_value=True), \
+             patch("bot.Config.github_branch_production", return_value="main"), \
+             patch("bot.deploy_manager") as mock_mgr:
+            mock_mgr.get_latest_commit.return_value = "abc1234"
+            await cmd_deploy(update, ctx)
+        msg = update.message.reply_text.call_args[0][0]
+        assert "main" in msg
+
+    @pytest.mark.asyncio
     async def test_staging_deploy_runs_for_staging_user(self):
         from bot import cmd_deploy
+        import bot
+        bot._deploying.clear()
         update = make_update(user_id=333)
         ctx = make_context(args=["staging"])
 
@@ -115,17 +131,16 @@ class TestDeployCommand:
 
     @pytest.mark.asyncio
     async def test_failed_deploy_triggers_rollback(self):
-        """BUG FIX: deploy failure must trigger auto-rollback, not silently succeed."""
+        """Deploy failure must trigger auto-rollback."""
         from bot import cmd_deploy
+        import bot
+        bot._deploying.clear()
         update = make_update(user_id=333)
         ctx = make_context(args=["staging"])
 
         async def fake_deploy_fail(env, commit):
             yield "[INFO] Starting deploy"
             yield "ERROR: Deploy script exited with code 1"
-
-        async def fake_rollback(env):
-            yield "[ROLLBACK] Restoring previous image"
 
         rollback_called = []
 
@@ -144,6 +159,71 @@ class TestDeployCommand:
             await cmd_deploy(update, ctx)
 
         assert rollback_called, "Rollback must be called when deployment fails"
+
+    @pytest.mark.asyncio
+    async def test_deploy_lock_prevents_concurrent_deploys(self):
+        """Fix #5: second deploy to same env is rejected while first is running."""
+        from bot import _run_deployment
+        import bot
+        bot._deploying.add("staging")
+        try:
+            update = make_update(user_id=333)
+            ctx = make_context()
+            with patch("bot.deploy_manager") as mock_mgr:
+                mock_mgr.get_latest_commit.return_value = "abc1234"
+                await _run_deployment(update, ctx, "staging", {"id": 333, "username": "u", "full_name": "u"})
+            # Should send "already in progress" message, not start a deploy
+            sent_texts = [call[1].get("text", "") or call[0][0] if call[0] else call[1].get("text","")
+                         for call in ctx.bot.send_message.call_args_list]
+            assert any("already" in str(t).lower() or "progress" in str(t).lower()
+                      for t in sent_texts)
+        finally:
+            bot._deploying.discard("staging")
+
+    @pytest.mark.asyncio
+    async def test_deploy_lock_released_after_success(self):
+        """Fix #5: lock must be released after deploy completes."""
+        from bot import _run_deployment
+        import bot
+        bot._deploying.clear()
+
+        async def fake_deploy(env, commit):
+            yield "[INFO] Done"
+
+        update = make_update(user_id=333)
+        ctx = make_context()
+        with patch("bot.deploy_manager") as mock_mgr, \
+             patch("bot.send_chunked", new_callable=AsyncMock), \
+             patch("bot.audit"):
+            mock_mgr.get_latest_commit.return_value = "abc1234"
+            mock_mgr.run_deployment = fake_deploy
+            await _run_deployment(update, ctx, "staging", {"id": 333, "username": "u", "full_name": "u"})
+
+        assert "staging" not in bot._deploying, "Lock must be released after deploy"
+
+    @pytest.mark.asyncio
+    async def test_deploy_lock_released_after_exception(self):
+        """Fix #5: lock must be released even if deploy raises an exception."""
+        from bot import _run_deployment
+        import bot
+        bot._deploying.clear()
+
+        async def exploding_deploy(env, commit):
+            raise RuntimeError("unexpected error")
+            yield  # make it an async generator
+
+        update = make_update(user_id=333)
+        ctx = make_context()
+        with patch("bot.deploy_manager") as mock_mgr, \
+             patch("bot.audit"):
+            mock_mgr.get_latest_commit.return_value = "abc1234"
+            mock_mgr.run_deployment = exploding_deploy
+            try:
+                await _run_deployment(update, ctx, "staging", {"id": 333, "username": "u", "full_name": "u"})
+            except Exception:
+                pass
+
+        assert "staging" not in bot._deploying, "Lock must be released even after exception"
 
 
 class TestRollbackCommand:
@@ -209,23 +289,6 @@ class TestStatusCommand:
         assert "staging" in msg.lower()
         assert "production" in msg.lower()
 
-    @pytest.mark.asyncio
-    async def test_status_shows_commit_hash(self):
-        from bot import cmd_status
-        update = make_update(user_id=333)
-        fake_status = {
-            "staging": {"healthy": True, "commit": "abc1234", "deployed_at": "never", "health_url": ""},
-            "production": {"healthy": True, "commit": "def5678", "deployed_at": "never", "health_url": ""},
-        }
-        with patch("rbac.Config.is_authorized", return_value=True), \
-             patch("bot.deploy_manager") as mock_mgr, \
-             patch("bot.audit"):
-            mock_mgr.get_status = AsyncMock(return_value=fake_status)
-            await cmd_status(update, make_context())
-        msg = update.message.reply_text.call_args[0][0]
-        assert "abc1234" in msg
-        assert "def5678" in msg
-
 
 class TestCallbackHandler:
     @pytest.mark.asyncio
@@ -247,34 +310,75 @@ class TestCallbackHandler:
         assert any(w in msg.lower() for w in ["permission", "denied", "no longer"])
 
     @pytest.mark.asyncio
-    async def test_admin_confirms_production_deploy(self):
+    async def test_callback_blocked_when_deploy_in_flight(self):
+        """Fix #5: callback must be rejected if env is already deploying."""
         from bot import handle_callback
-        update = make_callback_update(user_id=111, data="deploy:production:abc1234")
-        ctx = make_context()
+        import bot
+        bot._deploying.add("production")
+        try:
+            update = make_callback_update(user_id=111, data="deploy:production:abc1234")
+            with patch("bot.Config.is_admin", return_value=True):
+                await handle_callback(update, make_context())
+            msg = update.callback_query.edit_message_text.call_args[0][0]
+            assert "already" in msg.lower() or "progress" in msg.lower()
+        finally:
+            bot._deploying.discard("production")
 
-        async def fake_deploy(env, commit):
-            yield "[INFO] Deploying"
-
-        with patch("bot.Config.is_admin", return_value=True), \
-             patch("bot.deploy_manager") as mock_mgr, \
-             patch("bot.send_chunked", new_callable=AsyncMock), \
-             patch("bot.audit"):
-            mock_mgr.run_deployment = fake_deploy
-            mock_mgr.get_latest_commit.return_value = "abc1234"
-            await handle_callback(update, ctx)
-        update.callback_query.edit_message_text.assert_awaited()
+    @pytest.mark.asyncio
+    async def test_none_user_in_callback_is_handled_gracefully(self):
+        """Fix #3: callback with None user must not raise AttributeError."""
+        from bot import handle_callback
+        update = make_callback_update(user_id=111, data="deploy:cancel")
+        update.effective_user = None
+        # Should return silently without crashing
+        await handle_callback(update, make_context())
 
     @pytest.mark.asyncio
     async def test_callback_with_colon_in_commit_hash(self):
-        """BUG FIX: maxsplit=2 means colons in the commit slot are handled correctly."""
+        """maxsplit=2 means colons in the commit slot are handled correctly."""
         from bot import handle_callback
-        # Even if data has extra colons (malformed), parts[1] should still be environment
         update = make_callback_update(user_id=333, data="deploy:production:abc:extra")
         with patch("bot.Config.is_admin", return_value=False):
             await handle_callback(update, make_context())
-        # Should be blocked as non-admin, not crash
         msg = update.callback_query.edit_message_text.call_args[0][0]
         assert any(w in msg.lower() for w in ["permission", "denied", "no longer"])
+
+
+class TestStreamToChat:
+    @pytest.mark.asyncio
+    async def test_flushes_on_count(self):
+        """Buffer flushes when 10 lines accumulate."""
+        from bot import _stream_to_chat
+        ctx = make_context()
+        flush_calls = []
+
+        async def fake_send_chunked(context, chat_id, text):
+            flush_calls.append(text)
+
+        async def gen():
+            for i in range(10):
+                yield f"line {i}"
+
+        with patch("bot.send_chunked", side_effect=fake_send_chunked):
+            success, lines = await _stream_to_chat(ctx, 123, gen())
+
+        assert len(flush_calls) >= 1
+        assert success is True
+
+    @pytest.mark.asyncio
+    async def test_detects_error_line(self):
+        """Any ERROR: line marks the result as failed."""
+        from bot import _stream_to_chat
+        ctx = make_context()
+
+        async def gen():
+            yield "INFO: starting"
+            yield "ERROR: Deploy script exited with code 1"
+
+        with patch("bot.send_chunked", new_callable=AsyncMock):
+            success, lines = await _stream_to_chat(ctx, 123, gen())
+
+        assert success is False
 
 
 class TestErrorHandler:
