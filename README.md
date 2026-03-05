@@ -1,6 +1,6 @@
 # 🤖 Telegram Deployment Automation Bot
 
-A production-ready, secure Telegram bot for triggering deployments to staging and production environments — with role-based access control, audit logging, real-time log streaming, health checks, and auto-rollback.
+A production-ready, secure Telegram bot for triggering deployments to staging and production environments — with role-based access control, audit logging, real-time log streaming, concurrent health checks, deploy locking, subprocess timeouts, and auto-rollback.
 
 ---
 
@@ -20,33 +20,40 @@ A production-ready, secure Telegram bot for triggering deployments to staging an
 │  └─────────────┘             └────────┬─────────┘                       │
 │                                       │ ✅ Authorized                   │
 │                              ┌────────▼─────────┐                       │
+│                              │ Deploy Lock      │ ← prevents double-    │
+│                              │ (_deploying set) │   deploy race cond.   │
+│                              └────────┬─────────┘                       │
+│                                       │ ✅ Lock acquired                │
+│                              ┌────────▼─────────┐                       │
 │                              │ Inline Confirm   │                       │
 │                              │ (commit hash)    │                       │
 │                              └────────┬─────────┘                       │
 │                                       │ ✅ Confirmed                    │
 │                              ┌────────▼─────────┐                       │
 │                              │ DeploymentManager│                       │
-│                              │  subprocess exec │                       │
+│                              │ subprocess exec  │                       │
+│                              │ + timeout guard  │                       │
 │                              └────────┬─────────┘                       │
 │                    ┌──────────────────┼──────────────────┐              │
 │                    ▼                  ▼                  ▼              │
-│             ┌───────────┐  ┌──────────────────┐  ┌────────────┐        │
-│             │ Git Pull  │  │  Docker Build    │  │ Push to ECR│        │
-│             └───────────┘  └──────────────────┘  └─────┬──────┘        │
+│             ┌───────────┐  ┌──────────────────┐  ┌────────────┐         │
+│             │ Git Pull  │  │  Docker Build    │  │ Push to ECR│         │
+│             └───────────┘  └──────────────────┘  └─────┬──────┘         │
 │                                                         │               │
 │                    ┌────────────────────────────────────┘               │
-│                    ▼                                                     │
-│             ┌──────────────────┐                                         │
-│             │  Health Check   │                                         │
-│             │  (retry loop)   │                                         │
+│                    ▼                                                    │
+│             ┌──────────────────┐                                        │
+│             │  Health Check   │ ← state files written only              │
+│             │  (retry loop)   │   AFTER this passes                     │
 │             └────────┬────────┘                                         │
-│              ✅ Pass │  ❌ Fail                                         │
+│              ✅ Pass │  ❌ Fail                                        │
 │        ┌─────────────┴──────────────┐                                   │
 │        ▼                            ▼                                   │
 │  ┌───────────────┐         ┌─────────────────┐                          │
 │  │ Notify user ✅│         │  Auto-Rollback  │                          │
-│  └───────────────┘         │  Notify user ❌ │                          │
-│                             └─────────────────┘                          │
+│  │ Release lock  │         │  Notify user ❌ │                          │
+│  └───────────────┘         │  Release lock   │                          │
+│                             └─────────────────┘                         │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -58,12 +65,12 @@ A production-ready, secure Telegram bot for triggering deployments to staging an
 telegram-deploy-bot/
 │
 ├── bot/                        # Python bot source
-│   ├── bot.py                  # Main entry point, command handlers
-│   ├── config.py               # All config from environment variables
+│   ├── bot.py                  # Entry point, command handlers, deploy lock
+│   ├── config.py               # Lazy classmethod config (all values read at call time)
 │   ├── rbac.py                 # Role-based access control decorator
 │   ├── audit_logger.py         # Structured audit log (JSON Lines)
-│   ├── deployment.py           # Deployment orchestration
-│   └── requirements.txt        # Python dependencies
+│   ├── deployment.py           # Deployment orchestration + subprocess timeout
+│   └── requirements.txt        # Runtime Python dependencies
 │
 ├── scripts/                    # Shell scripts (the actual deploy work)
 │   ├── deploy.sh               # Full deployment pipeline
@@ -89,7 +96,9 @@ telegram-deploy-bot/
 │
 ├── Dockerfile                  # Multi-stage Docker build for the bot
 ├── docker-compose.yml          # Run the bot + supporting services
+├── requirements-dev.txt        # Pinned dev + test dependencies
 ├── .env.example                # Environment variable template
+├── .secrets.baseline           # detect-secrets baseline (committed)
 ├── pytest.ini                  # Pytest configuration
 └── README.md
 ```
@@ -133,7 +142,36 @@ telegram-deploy-bot/
 | `/deploy production` | Admin | Deploy `main` branch to production (requires confirmation) |
 | `/rollback staging` | Admin | Rollback staging to the previous image |
 | `/rollback production` | Admin | Rollback production to the previous image |
-| `/status` | Staging | Show health status and deployed commit for all environments |
+| `/status` | Staging | Show health and deployed commit for all environments |
+
+---
+
+## Environment Variables
+
+All configuration is read from environment variables at call time — never frozen at import time. Copy `.env.example` to `.env` to get started.
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `TELEGRAM_BOT_TOKEN` | ✅ | — | Bot token from @BotFather |
+| `ADMIN_TELEGRAM_IDS` | ✅ | — | Comma-separated admin user IDs |
+| `STAGING_TELEGRAM_IDS` | — | — | Comma-separated staging user IDs |
+| `REGISTRY_URL` | ✅ | — | ECR registry URL |
+| `REGISTRY_IMAGE` | — | `myapp` | Docker image name |
+| `AWS_REGION` | — | `us-east-1` | AWS region for ECR auth |
+| `STAGING_HOST` | — | — | Staging server IP/hostname |
+| `PRODUCTION_HOST` | — | — | Production server IP/hostname |
+| `DEPLOY_USER` | — | `deploy` | SSH user on target servers |
+| `SSH_KEY_PATH` | — | `/app/secrets/deploy_key` | Path to SSH deploy key |
+| `STAGING_HEALTH_URL` | — | — | Health check endpoint for staging |
+| `PRODUCTION_HEALTH_URL` | — | — | Health check endpoint for production |
+| `HEALTH_CHECK_TIMEOUT` | — | `30` | Seconds per health check request |
+| `HEALTH_CHECK_RETRIES` | — | `5` | Number of health check retries |
+| `DEPLOY_TIMEOUT_SECONDS` | — | `600` | Max seconds before deploy is killed |
+| `USE_KUBERNETES` | — | `false` | Use kubectl instead of Docker Compose |
+| `KUBE_NAMESPACE` | — | `default` | Kubernetes namespace |
+| `AUDIT_LOG_PATH` | — | `/var/log/deploybot/audit.log` | Audit log file path |
+| `GITHUB_BRANCH_STAGING` | — | `develop` | Branch deployed to staging |
+| `GITHUB_BRANCH_PRODUCTION` | — | `main` | Branch deployed to production |
 
 ---
 
@@ -142,12 +180,18 @@ telegram-deploy-bot/
 ### Role-Based Access Control (RBAC)
 
 ```
-ADMIN  → full access: production deploy, rollback, staging
-         set via: ADMIN_TELEGRAM_IDS=123456789,987654321
+ADMIN   → full access: production deploy, rollback, staging, /status
+          set via: ADMIN_TELEGRAM_IDS=123456789,987654321
 
 STAGING → limited access: staging deploy + /status only
           set via: STAGING_TELEGRAM_IDS=111222333
 ```
+
+Roles are enforced by the `@require_role` decorator on every handler. Admin role is re-verified on every callback button press — buttons cannot be replayed by unauthorized users.
+
+### Deploy Lock
+
+A module-level `_deploying: set[str]` prevents two concurrent deploys to the same environment. If an admin double-taps "Confirm" or a callback is replayed while a deploy is running, the second request is rejected immediately. The lock is released in a `try/finally` block so it is always freed, even if an unexpected exception occurs.
 
 ### Command Injection Prevention
 
@@ -155,26 +199,23 @@ STAGING → limited access: staging deploy + /status only
 # ❌ DANGEROUS — shell injection possible
 subprocess.run(f"deploy.sh {user_input}", shell=True)
 
-# ✅ SAFE — argument list, no shell interpolation
-subprocess.run(["/app/scripts/deploy.sh", environment, commit])
+# ✅ SAFE — fixed argument list, no shell interpolation
+asyncio.create_subprocess_exec("/app/scripts/deploy.sh", environment, commit)
 ```
 
-### F811 Fix — Config.get_telegram_bot_token()
+Environment and commit hash are additionally validated against strict allow-lists before reaching the subprocess call.
 
-The original code had a Ruff F811 error (redefinition of unused name) because
-`TELEGRAM_BOT_TOKEN` was defined twice in the same class body — once as a
-`@property` and once as a class-level `str` attribute. The class attribute
-silently overwrote the property, making the property unreachable.
+### Subprocess Timeout
 
-**Fix:** both definitions removed and replaced with a single `@classmethod`:
+Every deploy and rollback subprocess is wrapped in `asyncio.timeout(DEPLOY_TIMEOUT_SECONDS)`. If `deploy.sh` hangs — SSH timeout, docker build stall, network issue — the process is killed and an error is streamed back to the user. The bot never hangs indefinitely.
 
-```python
-@classmethod
-def get_telegram_bot_token(cls) -> str:
-    return os.environ.get("TELEGRAM_BOT_TOKEN", "")
-```
+### Audit Log Integrity
 
-This gives one name, one definition, lazy evaluation, and full testability.
+The audit log writes core fields (`timestamp`, `user_id`, `action`) **after** spreading arbitrary metadata, so no metadata key can silently overwrite the forensic trail. Every action — deploy started, deploy success, deploy failed, rollback, denial — is recorded with user identity, environment, commit, and UTC timestamp.
+
+### SSH Key Cleanup
+
+CI/CD deploy steps use `trap 'rm -f /tmp/deploy_key' EXIT` to guarantee the private key is deleted from the runner filesystem even if the SSH command fails.
 
 ---
 
@@ -184,31 +225,90 @@ This gives one name, one definition, lazy evaluation, and full testability.
 User → /deploy production
          │
          ▼
-1. RBAC check → not admin? 🚫 Denied
+1. RBAC check → not admin? 🚫 Denied + audited
          │ admin ✅
          ▼
-2. Fetch latest commit hash from git
+2. Check deploy lock → env already deploying? ⏳ Rejected
+         │ lock free ✅
+         ▼
+3. Fetch latest commit from Config.github_branch_production()
          │
          ▼
-3. Confirmation dialog
+4. Confirmation dialog (commit hash shown)
          │ Confirm clicked
          ▼
-4. Re-verify admin role (callbacks can be replayed)
+5. Re-verify admin role on callback
          │
          ▼
-5. Audit log: { user, action=deploy_started, env, commit, timestamp }
+6. Acquire deploy lock for environment
          │
          ▼
-6. Run deploy.sh production abc1234
-   ├── git pull origin main
-   ├── docker build + tag
+7. Audit log: { user, action=deploy_started, env, commit, timestamp }
+         │
+         ▼
+8. Run deploy.sh production <commit> (timeout: DEPLOY_TIMEOUT_SECONDS)
+   ├── Validate inputs (whitelist env, validate commit SHA format)
+   ├── git fetch + checkout + pull origin main
+   ├── docker build --no-cache (image tagged with exact commit)
+   ├── aws ecr get-login-password | docker login
    ├── docker push → ECR
+   ├── Save previous image ref for rollback
    ├── ssh deploy@host → docker compose up -d
-   └── health check (10 retries × 10s)
-         │
-         ├── ✅ SUCCESS → write state files, audit log, notify user
-         └── ❌ FAILURE → audit log, auto-rollback, notify user
+   └── Health check (10 retries × 10s)
+             │
+             ├── ✅ PASS → write state files (commit + timestamp)
+             │            audit log deploy_success
+             │            notify user ✅
+             │            release deploy lock
+             │
+             └── ❌ FAIL → audit log deploy_failed
+                           notify user ❌
+                           run rollback.sh (with timeout + streaming)
+                           audit log auto_rollback_completed/failed
+                           notify user with rollback result
+                           release deploy lock
 ```
+
+> **Why state files are written after health check:** If `deploy.sh` exits with code 1 (health check failed) and the bot triggers rollback, `rollback.sh` reads the previous image ref to revert to. Writing state files before health check would record a broken deployment as the last known-good state — the rollback would restore the broken image. State files are written only after a successful health check confirms the deployment is live and healthy.
+
+---
+
+## Running Tests
+
+```bash
+# Install runtime + dev dependencies
+pip install -r bot/requirements.txt
+pip install -r requirements-dev.txt
+
+# Run all tests
+pytest tests/ -v
+
+# Run with coverage
+pytest tests/ -v --cov=bot --cov-report=term-missing
+```
+
+**95 tests across 5 test files**, covering:
+
+- Config lazy evaluation and env-change reflection
+- RBAC allow/deny logic and HTML parse mode on denial messages
+- Deploy lock acquisition, rejection, and guaranteed release
+- Deployment streaming, error detection, and subprocess timeout
+- Concurrent health checks via `asyncio.gather()`
+- Audit log integrity (metadata cannot overwrite core fields)
+- Auto-rollback triggering on deploy failure
+- Callback security (re-verification, double-confirm rejection)
+
+---
+
+## CI/CD Pipeline
+
+```
+Push to develop → test → build → push to ECR → deploy to staging → health check
+Push to main    → test → build → push to ECR → [approval gate] → deploy to production → health check → notify Telegram
+Pull request    → test only
+```
+
+All GitHub Actions are pinned to specific versions (no `@master` tags). The security scan (`detect-secrets`) runs against a committed `.secrets.baseline` so it produces stable, reproducible results.
 
 ---
 
@@ -216,10 +316,13 @@ User → /deploy production
 
 ```bash
 cd terraform/
-bash destroy.sh            # interactive
-bash destroy.sh --dry-run  # preview only
-bash destroy.sh --force    # skip confirmation (CI)
+bash destroy.sh            # interactive — prompts "type DESTROY to confirm"
+bash destroy.sh --dry-run  # preview all commands without executing
+bash destroy.sh --force    # skip confirmation (CI use)
+bash destroy.sh --region eu-west-1  # override region
 ```
+
+Tears down EC2 instances, ECR repository and all images, IAM roles, VPC, subnets, internet gateway, security group, and SSH key pair.
 
 ---
 
@@ -227,23 +330,27 @@ bash destroy.sh --force    # skip confirmation (CI)
 
 ```
 Infrastructure:
-[ ] SSH: disable password auth and root login — key-only
-[ ] Firewall: block all ports except 22 and 443
+[ ] SSH: disable password auth and root login (key-only)
+[ ] Security group: restrict port 22 to your IP, not 0.0.0.0/0
 [ ] Rotate the SSH deploy key every 90 days
-[ ] ECR: scan images on push, fail CI on CRITICAL CVEs
+[ ] ECR: scan images on push, fail CI on CRITICAL CVEs (Trivy configured)
+[ ] Add SSH server fingerprints to known_hosts instead of StrictHostKeyChecking=no
 
 Bot Security:
-[ ] Whitelist Telegram user IDs — never run as a public bot
-[ ] Re-verify permissions on every callback
-[ ] Validate all inputs with strict allow-lists
-[ ] Never log secrets
+[ ] Whitelist only known Telegram user IDs — never run as a public bot
+[ ] Permissions re-verified on every callback (already implemented)
+[ ] Deploy lock prevents concurrent deploys (already implemented)
+[ ] Subprocess timeout prevents hangs (already implemented)
+[ ] Never log secrets (TELEGRAM_BOT_TOKEN excluded from safe_env)
 
 Deployment:
-[ ] Require PR approval before merging to main
-[ ] GitHub Environment protection rules for production
-[ ] Add post-deploy smoke tests on top of health check
+[ ] Require PR review before merging to main
+[ ] GitHub Environment protection rules with required reviewers for production
+[ ] Add post-deploy smoke tests on top of the health check
+[ ] Ship audit logs to immutable storage (S3 with Object Lock, CloudWatch Logs)
+[ ] Set DEPLOY_TIMEOUT_SECONDS to match your slowest expected build time
 ```
 
 ---
 
-*Built with Python · Runs on AWS EC2 · Deployed via Docker · Controlled via Telegram*
+*Built with Python 3.12 · python-telegram-bot 21 · Runs on AWS EC2 · Deployed via Docker · Controlled via Telegram*
