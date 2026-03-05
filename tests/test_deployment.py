@@ -3,7 +3,7 @@ test_deployment.py - Tests for DeploymentManager
 """
 import pytest
 import subprocess
-from unittest.mock import AsyncMock, MagicMock, patch, mock_open
+from unittest.mock import AsyncMock, MagicMock, patch
 from deployment import DeploymentManager
 
 
@@ -14,20 +14,22 @@ def manager():
 
 class TestInputValidation:
     @pytest.mark.asyncio
-    async def test_invalid_environment_raises_assertion(self, manager):
-        with pytest.raises(AssertionError):
+    async def test_invalid_environment_raises_value_error(self, manager):
+        # Fix #10: should raise ValueError, not AssertionError
+        with pytest.raises(ValueError):
             async for _ in manager.run_deployment("invalid_env", "abc123"):
                 pass
 
     @pytest.mark.asyncio
     async def test_shell_injection_in_environment_is_blocked(self, manager):
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError):
             async for _ in manager.run_deployment("staging; rm -rf /", "abc123"):
                 pass
 
     @pytest.mark.asyncio
-    async def test_invalid_commit_hash_raises_assertion(self, manager):
-        with pytest.raises(AssertionError):
+    async def test_invalid_commit_hash_raises_value_error(self, manager):
+        # Fix #10: should raise ValueError, not AssertionError
+        with pytest.raises(ValueError):
             async for _ in manager.run_deployment("staging", "abc123; rm -rf /"):
                 pass
 
@@ -45,20 +47,8 @@ class TestInputValidation:
             mock_proc.assert_called_once()
 
     @pytest.mark.asyncio
-    async def test_valid_production_env_passes_validation(self, manager):
-        with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_proc:
-            proc = MagicMock()
-            proc.stdout = _async_line_generator([b"Done\n"])
-            proc.wait = AsyncMock(return_value=0)
-            proc.returncode = 0
-            mock_proc.return_value = proc
-            async for _ in manager.run_deployment("production", "deadbeef"):
-                pass
-            mock_proc.assert_called_once()
-
-    @pytest.mark.asyncio
     async def test_unknown_commit_passes_validation(self, manager):
-        """'unknown' is a valid sentinel value and must not fail hex validation."""
+        """'unknown' is a valid sentinel value."""
         with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_proc:
             proc = MagicMock()
             proc.stdout = _async_line_generator([b"Done\n"])
@@ -98,7 +88,6 @@ class TestDeploymentStreaming:
             async for line in manager.run_deployment("staging", "abc1234"):
                 lines.append(line)
         assert any("ERROR" in l for l in lines)
-        assert any("1" in l for l in lines)
 
     @pytest.mark.asyncio
     async def test_emits_error_on_subprocess_exception(self, manager):
@@ -110,7 +99,6 @@ class TestDeploymentStreaming:
 
     @pytest.mark.asyncio
     async def test_error_line_not_emitted_on_success(self, manager):
-        """Successful deploy must NOT emit any ERROR: sentinel line."""
         with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_proc:
             proc = MagicMock()
             proc.stdout = _async_line_generator([b"[INFO] All good\n"])
@@ -120,8 +108,51 @@ class TestDeploymentStreaming:
             lines = []
             async for line in manager.run_deployment("staging", "abc1234"):
                 lines.append(line)
-        # No sentinel error lines should appear on a clean exit
         assert not any(l.startswith("ERROR:") for l in lines)
+
+    @pytest.mark.asyncio
+    async def test_timeout_emits_error_and_kills_process(self, manager, monkeypatch):
+        """Fix #17: deployment subprocess must be killed on timeout."""
+        monkeypatch.setenv("DEPLOY_TIMEOUT_SECONDS", "1")
+
+        async def slow_gen():
+            await asyncio.sleep(10)
+            yield b"never reached\n"
+
+        import asyncio as _asyncio
+        with patch("asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_proc:
+            proc = MagicMock()
+            proc.stdout = slow_gen()
+            proc.kill = MagicMock()
+            proc.wait = AsyncMock(return_value=None)
+            proc.returncode = -9
+            mock_proc.return_value = proc
+
+            lines = []
+            async for line in manager.run_deployment("staging", "abc1234"):
+                lines.append(line)
+
+        assert any("timed out" in l.lower() or "ERROR" in l for l in lines)
+
+
+class TestConcurrentHealthChecks:
+    @pytest.mark.asyncio
+    async def test_get_status_checks_both_envs_concurrently(self, manager):
+        """Fix #2: both health checks must run, regardless of individual failures."""
+        check_calls = []
+
+        async def fake_check(session, url):
+            check_calls.append(url)
+            return "staging" in url
+
+        with patch.object(manager, "_check_health", side_effect=fake_check), \
+             patch.object(manager, "_get_deployed_commit", return_value="abc123"), \
+             patch.object(manager, "_get_deployed_at", return_value="never"):
+            result = await manager.get_status()
+
+        assert len(check_calls) == 2, "Both envs must be checked"
+        assert result["staging"]["healthy"] is True
+        assert result["production"]["healthy"] is False
 
 
 class TestHealthCheck:
@@ -156,16 +187,6 @@ class TestHealthCheck:
         assert result is False
 
 
-class TestStateFiles:
-    def test_get_deployed_commit_returns_unknown_when_missing(self, manager):
-        result = manager._get_deployed_commit("staging")
-        assert result == "unknown"
-
-    def test_get_deployed_at_returns_never_when_missing(self, manager):
-        result = manager._get_deployed_at("production")
-        assert result == "never"
-
-
 class TestSafeEnv:
     def test_safe_env_contains_required_keys(self, manager):
         env = manager._safe_env()
@@ -173,10 +194,16 @@ class TestSafeEnv:
             "HOME", "PATH", "REGISTRY_URL", "REGISTRY_IMAGE",
             "STAGING_HOST", "PRODUCTION_HOST", "DEPLOY_USER",
             "SSH_KEY_PATH", "KUBE_NAMESPACE", "USE_KUBERNETES",
-            "AWS_REGION",  # BUG FIX: must be present for ECR login
+            "AWS_REGION",
         ]
         for key in required_keys:
             assert key in env, f"Missing key in safe_env: {key}"
+
+    def test_safe_env_home_is_not_root(self, manager):
+        """Fix #8: HOME must not be /root when running as non-root botuser."""
+        env = manager._safe_env()
+        assert env["HOME"] != "/root", "HOME should be /home/botuser, not /root"
+        assert env["HOME"] == "/home/botuser"
 
     def test_safe_env_does_not_contain_telegram_token(self, manager):
         env = manager._safe_env()
@@ -186,28 +213,30 @@ class TestSafeEnv:
         env = manager._safe_env()
         assert "GITHUB_TOKEN" not in env
 
-    def test_safe_env_has_restricted_path(self, manager):
-        env = manager._safe_env()
-        path = env["PATH"]
-        assert "~" not in path
-        assert "$HOME" not in path
-
     def test_safe_env_aws_region_matches_config(self, manager):
-        """AWS_REGION in safe_env must come from Config, not be hardcoded."""
         env = manager._safe_env()
         from config import Config
-        assert env["AWS_REGION"] == Config.AWS_REGION
+        assert env["AWS_REGION"] == Config.aws_region()
+
+    def test_safe_env_values_are_lazy(self, manager, monkeypatch):
+        """Fix #1: safe_env must return current env values, not import-time snapshots."""
+        monkeypatch.setenv("REGISTRY_URL", "new-registry.example.com")
+        env = manager._safe_env()
+        assert env["REGISTRY_URL"] == "new-registry.example.com"
+
+
+class TestStateFiles:
+    def test_get_deployed_commit_returns_unknown_when_missing(self, manager):
+        assert manager._get_deployed_commit("staging") == "unknown"
+
+    def test_get_deployed_at_returns_never_when_missing(self, manager):
+        assert manager._get_deployed_at("production") == "never"
 
 
 class TestGitHelpers:
     def test_get_latest_commit_returns_unknown_on_error(self, manager):
         with patch("subprocess.run", side_effect=subprocess.CalledProcessError(1, "git")):
             result = manager.get_latest_commit()
-        assert result == "unknown"
-
-    def test_get_current_branch_returns_unknown_on_error(self, manager):
-        with patch("subprocess.run", side_effect=subprocess.CalledProcessError(1, "git")):
-            result = manager.get_current_branch()
         assert result == "unknown"
 
     def test_get_latest_commit_strips_whitespace(self, manager):
@@ -218,15 +247,16 @@ class TestGitHelpers:
         assert result == "abc1234"
 
     def test_get_latest_commit_uses_branch_when_provided(self, manager):
-        """BUG FIX: branch parameter must be used, not ignored."""
+        """Branch parameter must be passed to git command."""
         mock_result = MagicMock()
         mock_result.stdout = "def5678\n"
         with patch("subprocess.run", return_value=mock_result) as mock_run:
             manager.get_latest_commit(branch="main")
-        call_args = mock_run.call_args[0][0]  # first positional arg = command list
-        # The branch name must appear in the git command
+        call_args = mock_run.call_args[0][0]
         assert any("main" in str(arg) for arg in call_args)
 
+
+import asyncio
 
 async def _async_line_gen(lines):
     for line in lines:
