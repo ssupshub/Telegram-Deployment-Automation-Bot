@@ -6,12 +6,12 @@ Supports staging/production deployments, rollbacks, and real-time logs.
 
 Architecture:
   Telegram → Bot Handler → RBAC Check → Deployment Script → Health Check → Notify
-
 """
 
 import asyncio
 import logging
 from datetime import datetime, timezone
+from typing import Optional
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -36,12 +36,23 @@ logger = logging.getLogger(__name__)
 audit = AuditLogger()
 deploy_manager = DeploymentManager()
 
+# Fix #5: in-flight deploy lock — prevents double-deploy from a double-tap
+# or a replayed callback. Maps environment → True while a deploy is running.
+_deploying: set[str] = set()
+
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def get_user_info(update: Update) -> dict:
-    """Extract user info from update for audit logging."""
+    """
+    Extract user info from update for audit logging.
+
+    Fix #3: guard against None effective_user (can occur for certain update
+    types, and handle_callback is not protected by @require_role).
+    """
     user = update.effective_user
+    if user is None:
+        return {"id": None, "username": "unknown", "full_name": "unknown"}
     return {
         "id": user.id,
         "username": user.username or "unknown",
@@ -50,61 +61,78 @@ def get_user_info(update: Update) -> dict:
 
 
 def _escape_html(text: str) -> str:
-    """Escape the three characters that are special in Telegram HTML mode."""
+    """Escape characters that are special in Telegram HTML mode."""
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
-async def send_chunked(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str):
+async def send_chunked(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str) -> None:
     """
-    Send long messages in Telegram-safe 4096-char chunks.
-
-    BUG FIX: the original used ParseMode.MARKDOWN_V2 with a triple-backtick
-    code fence.  In MarkdownV2 *every* special character (-, ., !, (, ) …)
-    must be escaped even inside code blocks, so raw shell output almost always
-    caused a "Bad Request: can't parse entities" error from the Telegram API.
-
-    Fix: switch to HTML mode for chunked log output.  The content is wrapped
-    in <pre> tags (monospace) and the text is HTML-escaped so angle brackets
-    and ampersands in shell output don't break the markup.
+    Send long messages in Telegram-safe 4096-char chunks using HTML mode.
+    Content is HTML-escaped so raw shell output never breaks markup.
     """
     chunk_size = 4000
     for i in range(0, len(text), chunk_size):
-        chunk = _escape_html(text[i : i + chunk_size])
+        chunk = _escape_html(text[i: i + chunk_size])
         await context.bot.send_message(
             chat_id=chat_id,
             text=f"<pre>{chunk}</pre>",
             parse_mode=ParseMode.HTML,
         )
-        await asyncio.sleep(0.3)  # avoid rate limits
+        await asyncio.sleep(0.3)  # stay within Telegram rate limits
 
 
 def _is_error_line(line: str) -> bool:
     """
-    Return True only for the sentinel error lines emitted by DeploymentManager,
-    not for arbitrary log lines that happen to mention the word 'error'.
-
-    DeploymentManager.run_deployment() always emits:
-        "ERROR: Deploy script exited with code <N>"
-        "ERROR: <exception message>"
-    and run_rollback() emits:
-        "ERROR: Rollback script exited with code <N>"
-        "ERROR during rollback: <exception message>"
-
-    Checking for the "ERROR:" prefix (capital, colon) catches exactly these
-    sentinel lines without false-positives on normal log content such as
-    "[INFO] Checking error.log for issues".
+    Return True only for sentinel error lines emitted by DeploymentManager.
+    Uses a specific prefix to avoid false-positives on normal log lines that
+    happen to contain the word "error".
     """
     return line.startswith("ERROR:") or line.startswith("ERROR during")
+
+
+async def _stream_to_chat(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    generator,
+) -> tuple[bool, list[str]]:
+    """
+    Consume an async generator of log lines, send them to Telegram in batches,
+    and return (success, all_lines).
+
+    Fix #19: buffer flushes both on count (10 lines) AND on time (every 2s),
+    so the user sees progress even if a deploy script goes quiet mid-run.
+    """
+    success = True
+    log_buffer: list[str] = []
+    all_lines: list[str] = []
+    last_flush = asyncio.get_event_loop().time()
+
+    async def flush():
+        nonlocal log_buffer, last_flush
+        if log_buffer:
+            await send_chunked(context, chat_id, "\n".join(log_buffer))
+            log_buffer = []
+            last_flush = asyncio.get_event_loop().time()
+
+    async for line in generator:
+        all_lines.append(line)
+        log_buffer.append(line)
+        if _is_error_line(line):
+            success = False
+
+        now = asyncio.get_event_loop().time()
+        if len(log_buffer) >= 10 or (now - last_flush) >= 2.0:
+            await flush()
+
+    await flush()  # drain any remaining lines
+    return success, all_lines
 
 
 # ── Command Handlers ───────────────────────────────────────────────────────────
 
 @require_role(Role.STAGING)
-async def cmd_deploy(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /deploy <environment>
-    Triggers a deployment. Production requires inline confirmation.
-    """
+async def cmd_deploy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/deploy <environment> — triggers a deployment."""
     user = get_user_info(update)
     args = context.args
 
@@ -117,7 +145,6 @@ async def cmd_deploy(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     environment = args[0]
 
-    # Production requires admin role.
     if environment == "production":
         if not Config.is_admin(update.effective_user.id):
             await update.message.reply_text("🚫 Production deployments require admin role.")
@@ -128,18 +155,22 @@ async def cmd_deploy(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _run_deployment(update, context, environment, user)
 
 
-async def _confirm_production_deploy(update: Update, context: ContextTypes.DEFAULT_TYPE, user: dict):
+async def _confirm_production_deploy(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    user: dict,
+) -> None:
     """Show inline confirmation buttons before production deploy."""
-    commit_hash = deploy_manager.get_latest_commit(branch=Config.GITHUB_BRANCH_PRODUCTION)
-    branch = deploy_manager.get_current_branch()
+    # Fix #13: pass the explicit production branch from Config instead of
+    # calling get_current_branch(), which returns the bot container's local
+    # HEAD — not the branch being deployed.
+    branch = Config.github_branch_production()
+    commit_hash = deploy_manager.get_latest_commit(branch=branch)
 
-    keyboard = [
-        [
-            InlineKeyboardButton("✅ Confirm Deploy", callback_data=f"deploy:production:{commit_hash}"),
-            InlineKeyboardButton("❌ Cancel", callback_data="deploy:cancel"),
-        ]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    keyboard = [[
+        InlineKeyboardButton("✅ Confirm Deploy", callback_data=f"deploy:production:{commit_hash}"),
+        InlineKeyboardButton("❌ Cancel", callback_data="deploy:cancel"),
+    ]]
 
     await update.message.reply_text(
         f"⚠️ <b>Production Deployment Confirmation</b>\n\n"
@@ -149,22 +180,21 @@ async def _confirm_production_deploy(update: Update, context: ContextTypes.DEFAU
         f"🕐 Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC\n\n"
         f"Are you sure you want to deploy to <b>PRODUCTION</b>?",
         parse_mode=ParseMode.HTML,
-        reply_markup=reply_markup,
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
 @require_role(Role.ADMIN)
-async def cmd_rollback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /rollback <environment>
-    Rolls back to the previous stable deployment.
-    """
+async def cmd_rollback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/rollback <environment> — rolls back to the previous stable deployment."""
     user = get_user_info(update)
     args = context.args
 
     if not args or args[0] not in ("staging", "production"):
-        await update.message.reply_text("⚠️ Usage: <code>/rollback staging</code> or <code>/rollback production</code>",
-                                        parse_mode=ParseMode.HTML)
+        await update.message.reply_text(
+            "⚠️ Usage: <code>/rollback staging</code> or <code>/rollback production</code>",
+            parse_mode=ParseMode.HTML,
+        )
         return
 
     environment = args[0]
@@ -175,21 +205,11 @@ async def cmd_rollback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode=ParseMode.HTML,
     )
 
-    # BUG FIX: the original silently ignored rollback output and never detected
-    # failures.  Now we stream the output and track success/failure.
-    rollback_success = True
-    log_buffer = []
-
-    async for log_line in deploy_manager.run_rollback(environment):
-        log_buffer.append(log_line)
-        if len(log_buffer) >= 10:
-            await send_chunked(context, update.effective_chat.id, "\n".join(log_buffer))
-            log_buffer = []
-        if _is_error_line(log_line):
-            rollback_success = False
-
-    if log_buffer:
-        await send_chunked(context, update.effective_chat.id, "\n".join(log_buffer))
+    rollback_success, _ = await _stream_to_chat(
+        context,
+        update.effective_chat.id,
+        deploy_manager.run_rollback(environment),
+    )
 
     if rollback_success:
         audit.log(user, "rollback_completed", {"env": environment})
@@ -208,11 +228,8 @@ async def cmd_rollback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 @require_role(Role.STAGING)
-async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    /status
-    Shows current deployment status for all environments.
-    """
+async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/status — shows current deployment status for all environments."""
     user = get_user_info(update)
     audit.log(user, "status_checked", {})
 
@@ -231,7 +248,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
-async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show available commands based on user role."""
     user_id = update.effective_user.id
     is_admin = Config.is_admin(user_id)
@@ -258,21 +275,19 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
-# ── Callback Query Handler (Inline Buttons) ────────────────────────────────────
+# ── Callback Query Handler ─────────────────────────────────────────────────────
 
-async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle inline keyboard button presses."""
     query = update.callback_query
     await query.answer()
 
+    # Fix #3: guard against None user before calling get_user_info
+    if update.effective_user is None:
+        return
     user = get_user_info(update)
-    data = query.data  # e.g. "deploy:production:abc1234" or "deploy:cancel"
 
-    # BUG FIX: use maxsplit=2 so the commit hash (parts[2]) captures everything
-    # after the second colon.  With the default split() a hash containing ":"
-    # would be truncated.  Git short SHAs won't contain ":" but this also
-    # prevents an attacker from injecting extra colon-delimited segments that
-    # shift the index of subsequent parts.
+    data = query.data
     parts = data.split(":", maxsplit=2)
     action = parts[0]
 
@@ -290,6 +305,15 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text("🚫 You no longer have permission for this action.")
             return
 
+        # Fix #5: reject if a deploy for this environment is already in flight.
+        if environment in _deploying:
+            await query.edit_message_text(
+                f"⏳ A deployment to <b>{_escape_html(environment)}</b> is already in progress. "
+                f"Please wait for it to finish.",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
         await query.edit_message_text(
             f"🚀 Deploying to <b>{_escape_html(environment)}</b>...",
             parse_mode=ParseMode.HTML,
@@ -302,94 +326,102 @@ async def _run_deployment(
     context: ContextTypes.DEFAULT_TYPE,
     environment: str,
     user: dict,
-    confirmed_commit: str = None,
-):
+    confirmed_commit: Optional[str] = None,  # Fix #16: correct Optional type
+) -> None:
     """Core deployment execution with real-time log streaming."""
     chat_id = update.effective_chat.id
-    commit = confirmed_commit or deploy_manager.get_latest_commit()
 
-    audit.log(user, "deploy_started", {"env": environment, "commit": commit})
+    # Fix #13: resolve commit from the correct branch, not local HEAD.
+    if confirmed_commit:
+        commit = confirmed_commit
+    else:
+        branch = (
+            Config.github_branch_production()
+            if environment == "production"
+            else Config.github_branch_staging()
+        )
+        commit = deploy_manager.get_latest_commit(branch=branch)
 
-    await context.bot.send_message(
-        chat_id=chat_id,
-        text=(
-            f"🚀 <b>Deployment Started</b>\n\n"
-            f"🌍 Environment: <code>{_escape_html(environment)}</code>\n"
-            f"🔖 Commit: <code>{_escape_html(commit)}</code>\n"
-            f"👤 By: @{_escape_html(user['username'])}\n"
-            f"🕐 {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC"
-        ),
-        parse_mode=ParseMode.HTML,
-    )
-
-    # BUG FIX: success used to be set *after* the loop based on the last line
-    # examined, but Python's for-loop variable retains the last value — if the
-    # error line arrived mid-stream the flag would still be True at the end.
-    # Now `success` is updated inside the loop so any error line flips it to
-    # False permanently.
-    success = True
-    log_buffer = []
-
-    async for log_line in deploy_manager.run_deployment(environment, commit):
-        log_buffer.append(log_line)
-        if len(log_buffer) >= 10:
-            await send_chunked(context, chat_id, "\n".join(log_buffer))
-            log_buffer = []
-
-        # BUG FIX: check for the specific sentinel prefix, not arbitrary
-        # occurrences of the word "ERROR" or "FAILED" in log output.
-        if _is_error_line(log_line):
-            success = False
-
-    # Flush remaining buffered lines.
-    if log_buffer:
-        await send_chunked(context, chat_id, "\n".join(log_buffer))
-
-    if success:
-        audit.log(user, "deploy_success", {"env": environment, "commit": commit})
+    # Fix #5: acquire the deploy lock before starting.
+    if environment in _deploying:
         await context.bot.send_message(
             chat_id=chat_id,
-            text=f"✅ <b>Deployment to {_escape_html(environment)} succeeded!</b>\n🔖 Commit: <code>{_escape_html(commit)}</code>",
+            text=f"⏳ A deployment to <b>{_escape_html(environment)}</b> is already running.",
             parse_mode=ParseMode.HTML,
         )
-    else:
-        audit.log(user, "deploy_failed", {"env": environment, "commit": commit})
+        return
+
+    _deploying.add(environment)
+    try:
+        audit.log(user, "deploy_started", {"env": environment, "commit": commit})
+
         await context.bot.send_message(
             chat_id=chat_id,
             text=(
-                f"❌ <b>Deployment to {_escape_html(environment)} FAILED!</b>\n"
+                f"🚀 <b>Deployment Started</b>\n\n"
+                f"🌍 Environment: <code>{_escape_html(environment)}</code>\n"
                 f"🔖 Commit: <code>{_escape_html(commit)}</code>\n"
-                f"⏪ Initiating automatic rollback..."
+                f"👤 By: @{_escape_html(user['username'])}\n"
+                f"🕐 {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC"
             ),
             parse_mode=ParseMode.HTML,
         )
 
-        # BUG FIX: the original discarded all rollback output with `pass`.
-        # Now we stream it back to the user so they can see rollback progress
-        # and detect if the rollback itself failed.
-        rollback_success = True
-        rb_buffer = []
-        async for line in deploy_manager.run_rollback(environment):
-            rb_buffer.append(line)
-            if len(rb_buffer) >= 10:
-                await send_chunked(context, chat_id, "\n".join(rb_buffer))
-                rb_buffer = []
-            if _is_error_line(line):
-                rollback_success = False
+        success, _ = await _stream_to_chat(
+            context,
+            chat_id,
+            deploy_manager.run_deployment(environment, commit),
+        )
 
-        if rb_buffer:
-            await send_chunked(context, chat_id, "\n".join(rb_buffer))
+        if success:
+            audit.log(user, "deploy_success", {"env": environment, "commit": commit})
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"✅ <b>Deployment to {_escape_html(environment)} succeeded!</b>\n"
+                    f"🔖 Commit: <code>{_escape_html(commit)}</code>"
+                ),
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            audit.log(user, "deploy_failed", {"env": environment, "commit": commit})
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    f"❌ <b>Deployment to {_escape_html(environment)} FAILED!</b>\n"
+                    f"🔖 Commit: <code>{_escape_html(commit)}</code>\n"
+                    f"⏪ Initiating automatic rollback..."
+                ),
+                parse_mode=ParseMode.HTML,
+            )
 
-        rollback_status = "✅ Auto-rollback completed." if rollback_success else "❌ Auto-rollback also FAILED — manual intervention required!"
-        audit.log(user, "auto_rollback_completed" if rollback_success else "auto_rollback_failed",
-                  {"env": environment, "commit": commit})
-        await context.bot.send_message(chat_id=chat_id, text=rollback_status)
+            rollback_success, _ = await _stream_to_chat(
+                context,
+                chat_id,
+                deploy_manager.run_rollback(environment),
+            )
+
+            rollback_status = (
+                "✅ Auto-rollback completed."
+                if rollback_success
+                else "❌ Auto-rollback also FAILED — manual intervention required!"
+            )
+            audit.log(
+                user,
+                "auto_rollback_completed" if rollback_success else "auto_rollback_failed",
+                {"env": environment, "commit": commit},
+            )
+            await context.bot.send_message(chat_id=chat_id, text=rollback_status)
+
+    finally:
+        # Fix #5: always release the lock, even if an exception occurs.
+        _deploying.discard(environment)
 
 
 # ── Error Handler ──────────────────────────────────────────────────────────────
 
-async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    """Log errors and notify admins."""
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Log errors and notify the user."""
     logger.error("Exception:", exc_info=context.error)
     if update and hasattr(update, "effective_message") and update.effective_message:
         await update.effective_message.reply_text(
@@ -399,12 +431,10 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
-def main():
+def main() -> None:
     """Initialize and start the bot."""
-    Config.validate()  # fail fast on missing required config
+    Config.validate()
 
-    # FIX: use Config.get_telegram_bot_token() — the single, canonical way to
-    # read the token, replacing the ambiguous dual @property / class-attribute.
     token = Config.get_telegram_bot_token()
     if not token:
         raise ValueError("TELEGRAM_BOT_TOKEN not set in environment")
